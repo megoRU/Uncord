@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "",
   "main": "index.ts",
-  "type": "commonjs",
+  "type": "module",
   "scripts": {
     "dev": "tsx watch index.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -12,7 +12,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "bcryptjs": "^3.0.3",
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "mediasoup": "^3.19.21",
@@ -27,6 +27,6 @@
     "@types/node": "^25.6.0",
     "@types/sequelize": "^4.28.20",
     "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.7.3"
   }
 }

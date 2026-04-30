@@ -10,12 +10,12 @@ interface GuildAttributes {
 interface GuildCreationAttributes extends Optional<GuildAttributes, 'id'> {}
 
 class Guild extends Model<GuildAttributes, GuildCreationAttributes> implements GuildAttributes {
-  public id!: number;
-  public name!: string;
-  public ownerId!: number;
+  declare id: number;
+  declare name: string;
+  declare ownerId: number;
 
-  public readonly createdAt!: Date;
-  public readonly updatedAt!: Date;
+  declare readonly createdAt: Date;
+  declare readonly updatedAt: Date;
 }
 
 Guild.init({

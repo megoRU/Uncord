@@ -10,12 +10,12 @@ interface RoomAttributes {
 interface RoomCreationAttributes extends Optional<RoomAttributes, 'id'> {}
 
 class Room extends Model<RoomAttributes, RoomCreationAttributes> implements RoomAttributes {
-  public id!: number;
-  public name!: string;
-  public guildId!: number;
+  declare id: number;
+  declare name: string;
+  declare guildId: number;
 
-  public readonly createdAt!: Date;
-  public readonly updatedAt!: Date;
+  declare readonly createdAt: Date;
+  declare readonly updatedAt: Date;
 }
 
 Room.init({
