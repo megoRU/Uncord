@@ -67,6 +67,10 @@ class MediasoupService {
           });
         });
 
+        this.sendTransport.on('connectionstatechange', (state) => {
+          console.log('Send transport connection state change:', state);
+        });
+
         resolve();
       });
     });
@@ -84,6 +88,10 @@ class MediasoupService {
           });
         });
 
+        this.recvTransport.on('connectionstatechange', (state) => {
+          console.log('Recv transport connection state change:', state);
+        });
+
         resolve();
       });
     });
@@ -96,20 +104,35 @@ class MediasoupService {
     return producer;
   }
 
-  async consume(producerId: string, _peerId: string, callback: (track: MediaStreamTrack) => void) {
-    if (!this.recvTransport || !this.device) return;
-    socket.emit('consume', {
-      transportId: this.recvTransport.id,
-      producerId,
-      rtpCapabilities: this.device.rtpCapabilities
-    }, async (params: ConsumerOptions) => {
-      if (!this.recvTransport) return;
-      const consumer = await this.recvTransport.consume(params);
-      this.consumers.set(consumer.id, consumer);
+  async consume(producerId: string, _peerId: string): Promise<MediaStreamTrack> {
+    return new Promise((resolve, reject) => {
+      if (!this.recvTransport || !this.device) {
+        return reject(new Error('Transport or Device not initialized'));
+      }
 
-      socket.emit('resumeConsumer', { consumerId: consumer.id });
+      socket.emit('consume', {
+        transportId: this.recvTransport.id,
+        producerId,
+        rtpCapabilities: this.device.rtpCapabilities
+      }, async (params: any) => {
+        if (params.error) {
+          console.error('Consume error:', params.error);
+          return reject(new Error(params.error));
+        }
 
-      callback(consumer.track);
+        if (!this.recvTransport) return reject(new Error('Transport closed'));
+
+        try {
+          const consumer = await this.recvTransport.consume(params);
+          this.consumers.set(consumer.id, consumer);
+
+          socket.emit('resumeConsumer', { consumerId: consumer.id });
+          resolve(consumer.track);
+        } catch (error) {
+          console.error('recvTransport.consume failed:', error);
+          reject(error);
+        }
+      });
     });
   }
 
