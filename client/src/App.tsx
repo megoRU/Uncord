@@ -61,6 +61,7 @@ function App() {
   const [modalTitle, setModalTitle] = useState('');
   const [modalValue, setModalValue] = useState('');
   const [modalAction, setModalAction] = useState<((val: string) => void) | null>(null);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   const [peers, setPeers] = useState<Peer[]>([]);
   const [activeSpeaker, setActiveSpeaker] = useState<string | null>(null);
@@ -181,7 +182,7 @@ function App() {
     });
   };
 
-  const leaveRoom = () => {
+  const leaveRoom = async () => {
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(t => t.stop());
       localStreamRef.current = null;
@@ -190,8 +191,13 @@ function App() {
     Object.values(remoteAudiosRef.current).forEach(a => a.remove());
     remoteAudiosRef.current = {};
 
+    await mediasoupService.leaveRoom();
+    socket.emit('leaveRoom');
+
     setCurrentRoom(null);
     setPeers([]);
+    setIsMuted(false);
+    setIsDeafened(false);
   };
 
   const joinRoom = async (room: Room) => {
@@ -308,12 +314,15 @@ function App() {
     <div style={{ display: 'flex', height: '100vh', fontFamily: 'sans-serif', backgroundColor: '#2f3136', color: 'white' }}>
       {/* Sidebar: Guilds */}
       <div style={{ width: '70px', backgroundColor: '#202225', padding: '10px', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-        <div onClick={createGuild} style={guildIconStyle} title="Создать гильдию">+</div>
-        {guilds.map(g => (
-          <div key={g.id} onClick={() => { setSelectedGuild(g); loadRooms(g.id); }} style={{ ...guildIconStyle, backgroundColor: selectedGuild?.id === g.id ? '#5865f2' : '#36393f' }}>
-            {g.name[0]}
-          </div>
-        ))}
+        <div style={{ flex: 1, width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+          <div onClick={createGuild} style={guildIconStyle} title="Создать гильдию">+</div>
+          {guilds.map(g => (
+            <div key={g.id} onClick={() => { setSelectedGuild(g); loadRooms(g.id); }} style={{ ...guildIconStyle, backgroundColor: selectedGuild?.id === g.id ? '#5865f2' : '#36393f' }}>
+              {g.name[0]}
+            </div>
+          ))}
+        </div>
+        <div onClick={() => setIsSettingsOpen(true)} style={{ ...guildIconStyle, marginTop: 'auto' }} title="Настройки">⚙️</div>
       </div>
 
       {/* Sidebar: Rooms */}
@@ -350,13 +359,15 @@ function App() {
             </div>
           )}
           <div style={{ display: 'flex', gap: '5px' }}>
-            <button onClick={toggleMute} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', padding: '2px' }} title={isMuted ? 'Включить микрофон' : 'Выключить микрофон'}>
-              {isMuted ? '🔇' : '🎙️'}
+            <button onClick={toggleMute} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', padding: '2px', position: 'relative' }} title={isMuted ? 'Включить микрофон' : 'Выключить микрофон'}>
+              🎙️
+              {isMuted && <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#ed4245', fontWeight: 'bold', fontSize: '24px', pointerEvents: 'none' }}>/</div>}
             </button>
-            <button onClick={toggleDeafen} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', padding: '2px' }} title={isDeafened ? 'Включить звук' : 'Выключить звук'}>
-              {isDeafened ? '🔈❌' : '🎧'}
+            <button onClick={toggleDeafen} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', padding: '2px', position: 'relative' }} title={isDeafened ? 'Включить звук' : 'Выключить звук'}>
+              🎧
+              {isDeafened && <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#ed4245', fontWeight: 'bold', fontSize: '24px', pointerEvents: 'none' }}>/</div>}
             </button>
-            <button onClick={handleLogout} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', padding: '2px' }} title="Выйти">
+            <button onClick={() => leaveRoom()} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', padding: '2px' }} title="Выйти из канала">
               🚪
             </button>
           </div>
@@ -382,6 +393,18 @@ function App() {
           </div>
         )}
       </div>
+
+      {/* Settings Modal */}
+      {isSettingsOpen && (
+        <div style={{ position: 'absolute', top: 0, left: 0, width: '100vw', height: '100vh', backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ backgroundColor: '#36393f', padding: '30px', borderRadius: '8px', minWidth: '300px', textAlign: 'center' }}>
+            <h3 style={{ marginTop: 0 }}>Настройки</h3>
+            <p>Аккаунт: <strong>{user.username}</strong></p>
+            <button onClick={() => { handleLogout(); setIsSettingsOpen(false); }} style={{ ...buttonStyle, backgroundColor: '#ed4245' }}>Выйти из аккаунта</button>
+            <button onClick={() => setIsSettingsOpen(false)} style={{ ...buttonStyle, backgroundColor: '#4f545c', marginTop: '10px' }}>Закрыть</button>
+          </div>
+        </div>
+      )}
 
       {/* Modal */}
       {isModalOpen && (
@@ -448,7 +471,23 @@ function UserAvatar({ username, isSpeaking, isMuted, isMe }: UserAvatarProps) {
         position: 'relative'
       }}>
         {username[0]}
-        {isMuted && <span style={{ position: 'absolute', bottom: 0, right: 0, fontSize: '14px' }}>🚫</span>}
+        {isMuted && (
+          <div style={{
+            position: 'absolute',
+            bottom: 0,
+            right: 0,
+            backgroundColor: '#ed4245',
+            borderRadius: '50%',
+            width: '20px',
+            height: '20px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: '12px'
+          }}>
+            /
+          </div>
+        )}
       </div>
       <div>{username} {isMe && '(Вы)'}</div>
     </div>

@@ -109,6 +109,18 @@ class MediasoupService {
       callback(consumer.track);
     });
   }
+
+  async leaveRoom() {
+    this.producers.forEach(p => p.close());
+    this.consumers.forEach(c => c.close());
+    if (this.sendTransport) this.sendTransport.close();
+    if (this.recvTransport) this.recvTransport.close();
+    this.producers.clear();
+    this.consumers.clear();
+    this.sendTransport = null;
+    this.recvTransport = null;
+    this.device = null;
+  }
 }
 
 export default new MediasoupService();

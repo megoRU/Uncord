@@ -93,6 +93,28 @@ async function createWebRtcTransport(router: Router) {
   };
 }
 
+function handleLeaveRoom(socketId: string) {
+  for (const [roomId, room] of rooms) {
+    if (room.participants.has(socketId)) {
+      const peer = room.participants.get(socketId);
+      if (peer) {
+        peer.transports.forEach(t => t.close());
+        peer.producers.forEach(p => p.close());
+        peer.consumers.forEach(c => c.close());
+      }
+
+      room.participants.delete(socketId);
+      io.to(roomId).emit('peerLeft', { peerId: socketId });
+
+      if (room.participants.size === 0) {
+        room.router.close();
+        rooms.delete(roomId);
+      }
+      break;
+    }
+  }
+}
+
 interface CustomSocket extends Socket {
   userId?: number;
   username?: string;
@@ -179,6 +201,8 @@ io.on('connection', (socket: CustomSocket) => {
   socket.on('joinRoom', async ({ roomId, nickname }, callback: (res: any) => void) => {
     roomId = String(roomId);
     console.log(`User ${nickname} (${socket.id}) joining room ${roomId}`);
+
+    handleLeaveRoom(socket.id);
 
     let room = rooms.get(roomId);
     if (!room) {
@@ -321,29 +345,16 @@ io.on('connection', (socket: CustomSocket) => {
     callback();
   });
 
+  socket.on('leaveRoom', (callback?: () => void) => {
+    handleLeaveRoom(socket.id);
+    if (callback) callback();
+  });
+
   socket.on('disconnect', () => {
     console.log('Socket disconnected:', socket.id);
     onlineUsers.delete(socket.id);
     broadcastOnlineUsers();
-    for (const [roomId, room] of rooms) {
-      if (room.participants.has(socket.id)) {
-        const peer = room.participants.get(socket.id);
-        if (peer) {
-          peer.transports.forEach(t => t.close());
-          peer.producers.forEach(p => p.close());
-          peer.consumers.forEach(c => c.close());
-        }
-
-        room.participants.delete(socket.id);
-        socket.to(roomId).emit('peerLeft', { peerId: socket.id });
-
-        if (room.participants.size === 0) {
-          room.router.close();
-          rooms.delete(roomId);
-        }
-        break;
-      }
-    }
+    handleLeaveRoom(socket.id);
   });
 });
 
