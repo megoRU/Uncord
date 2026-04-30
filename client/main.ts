@@ -1,5 +1,9 @@
-const { app, BrowserWindow } = require('electron');
-const path = require('path');
+import { app, BrowserWindow } from 'electron';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -10,6 +14,8 @@ function createWindow() {
       contextIsolation: false,
     },
   });
+
+  win.removeMenu();
 
   // В разработке загружаем с порта Vite, в продакшене из билда
   if (process.env.VITE_DEV_SERVER_URL) {
