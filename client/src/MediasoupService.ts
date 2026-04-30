@@ -104,6 +104,28 @@ class MediasoupService {
     return producer;
   }
 
+  async pauseProducer(producerId?: string) {
+    if (producerId) {
+      const producer = this.producers.get(producerId);
+      if (producer) await producer.pause();
+    } else {
+      for (const producer of this.producers.values()) {
+        if (producer.kind === 'audio') await producer.pause();
+      }
+    }
+  }
+
+  async resumeProducer(producerId?: string) {
+    if (producerId) {
+      const producer = this.producers.get(producerId);
+      if (producer) await producer.resume();
+    } else {
+      for (const producer of this.producers.values()) {
+        if (producer.kind === 'audio') await producer.resume();
+      }
+    }
+  }
+
   async consume(producerId: string, _peerId: string): Promise<MediaStreamTrack> {
     return new Promise((resolve, reject) => {
       if (!this.recvTransport || !this.device) {

@@ -100,7 +100,7 @@ async function createWebRtcTransport(router: Router) {
   };
 }
 
-function handleLeaveRoom(socketId: string) {
+async function handleLeaveRoom(socketId: string) {
   for (const [roomId, room] of rooms) {
     if (room.participants.has(socketId)) {
       const peer = room.participants.get(socketId);
@@ -112,6 +112,20 @@ function handleLeaveRoom(socketId: string) {
 
       room.participants.delete(socketId);
       io.to(roomId).emit('peerLeft', { peerId: socketId });
+
+      const roomRecord = await Room.findByPk(roomId);
+      if (roomRecord) {
+        const roomsList = await Room.findAll({ where: { guildId: roomRecord.guildId } });
+        const roomsWithParticipants = roomsList.map(r => {
+          const roomData = rooms.get(String(r.id));
+          const participants = roomData ? Array.from(roomData.participants.entries()).map(([id, p]) => ({
+            peerId: id,
+            nickname: p.nickname
+          })) : [];
+          return { ...r.toJSON(), participants };
+        });
+        io.to(`guild_${roomRecord.guildId}`).emit('roomUsersUpdate', { guildId: roomRecord.guildId, rooms: roomsWithParticipants });
+      }
 
       if (room.participants.size === 0) {
         room.router.close();
@@ -201,10 +215,32 @@ io.on('connection', (socket: CustomSocket) => {
     }
   });
 
+  const broadcastRoomUsersUpdate = async (guildId: number) => {
+    const roomsList = await Room.findAll({ where: { guildId } });
+    const roomsWithParticipants = roomsList.map(r => {
+      const roomData = rooms.get(String(r.id));
+      const participants = roomData ? Array.from(roomData.participants.entries()).map(([id, p]) => ({
+        peerId: id,
+        nickname: p.nickname
+      })) : [];
+      return { ...r.toJSON(), participants };
+    });
+    io.to(`guild_${guildId}`).emit('roomUsersUpdate', { guildId, rooms: roomsWithParticipants });
+  };
+
   socket.on('getRooms', async ({ guildId }, callback: (res: any) => void) => {
     try {
+      socket.join(`guild_${guildId}`);
       const roomsList = await Room.findAll({ where: { guildId } });
-      callback({ success: true, rooms: roomsList });
+      const roomsWithParticipants = roomsList.map(r => {
+        const roomData = rooms.get(String(r.id));
+        const participants = roomData ? Array.from(roomData.participants.entries()).map(([id, p]) => ({
+          peerId: id,
+          nickname: p.nickname
+        })) : [];
+        return { ...r.toJSON(), participants };
+      });
+      callback({ success: true, rooms: roomsWithParticipants });
     } catch (error) {
       callback({ success: false, error: 'Failed to get rooms' });
     }
@@ -212,9 +248,10 @@ io.on('connection', (socket: CustomSocket) => {
 
   socket.on('joinRoom', async ({ roomId, nickname }, callback: (res: any) => void) => {
     roomId = String(roomId);
+    const roomRecord = await Room.findByPk(roomId);
     console.log(`User ${nickname} (${socket.id}) joining room ${roomId}`);
 
-    handleLeaveRoom(socket.id);
+    await handleLeaveRoom(socket.id);
 
     let room = rooms.get(roomId);
     if (!room) {
@@ -261,6 +298,9 @@ io.on('connection', (socket: CustomSocket) => {
     socket.join(roomId);
 
     socket.to(roomId).emit('peerJoined', { peerId: socket.id, nickname });
+    if (roomRecord) {
+      broadcastRoomUsersUpdate(roomRecord.guildId);
+    }
 
     const peerList: any[] = [];
     for (const [id, data] of room.participants) {

@@ -16,6 +16,7 @@ interface Room {
   id: number;
   name: string;
   guildId: number;
+  participants?: { peerId: string; nickname: string }[];
 }
 
 interface Peer {
@@ -61,7 +62,7 @@ function App() {
   const [modalTitle, setModalTitle] = useState('');
   const [modalValue, setModalValue] = useState('');
   const [modalAction, setModalAction] = useState<((val: string) => void) | null>(null);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<'app' | 'settings'>('app');
   const [isInviteManagerOpen, setIsSettingsInviteManagerOpen] = useState(false);
   const [invites, setInvites] = useState<{ id: number; code: string }[]>([]);
 
@@ -73,8 +74,32 @@ function App() {
   const [ping, setPing] = useState<number | null>(null);
   const [showDebug, setShowDebug] = useState(false);
 
+  // VAD states
+  const [voiceThreshold, setVoiceThreshold] = useState<number>(() => {
+    const saved = localStorage.getItem('voiceThreshold');
+    return saved ? Number(saved) : -50;
+  });
+  const [currentVolume, setCurrentVolume] = useState<number>(-100);
+  const [isVoiceActive, setIsVoiceActive] = useState<boolean>(false);
+
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteAudiosRef = useRef<{ [peerId: string]: HTMLAudioElement }>({});
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+
+  useEffect(() => {
+    if (currentVolume > voiceThreshold) {
+      if (!isVoiceActive && !isMuted) {
+        setIsVoiceActive(true);
+        mediasoupService.resumeProducer();
+      }
+    } else {
+      if (isVoiceActive) {
+        setIsVoiceActive(false);
+        mediasoupService.pauseProducer();
+      }
+    }
+  }, [currentVolume, voiceThreshold, isMuted, isVoiceActive]);
 
   useEffect(() => {
     let pingInterval: any;
@@ -133,12 +158,40 @@ function App() {
       setOnlineUsers(users);
     });
 
+    const checkVolume = () => {
+      if (analyserRef.current) {
+        const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
+        analyserRef.current.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          sum += dataArray[i];
+        }
+        const average = sum / dataArray.length;
+        // Convert to dB-like scale (0-100 to roughly -100 to 0)
+        const db = average > 0 ? 20 * Math.log10(average / 255) : -100;
+        setCurrentVolume(Math.round(db));
+      }
+      requestAnimationFrame(checkVolume);
+    };
+    const animId = requestAnimationFrame(checkVolume);
+
+    socket.on('roomUsersUpdate', ({ guildId, rooms: updatedRooms }: { guildId: number, rooms: Room[] }) => {
+      setRooms(prevRooms => {
+        if (prevRooms.length > 0 && prevRooms[0].guildId === guildId) {
+          return updatedRooms;
+        }
+        return prevRooms;
+      });
+    });
+
     return () => {
       socket.off('peerJoined');
       socket.off('peerLeft');
       socket.off('newProducer');
       socket.off('activeSpeaker');
       socket.off('onlineUsersUpdate');
+      socket.off('roomUsersUpdate');
+      cancelAnimationFrame(animId);
     };
   }, []);
 
@@ -216,6 +269,11 @@ function App() {
       localStreamRef.current.getTracks().forEach(t => t.stop());
       localStreamRef.current = null;
     }
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+      analyserRef.current = null;
+    }
     // Clean up remote audios
     Object.values(remoteAudiosRef.current).forEach(a => a.remove());
     remoteAudiosRef.current = {};
@@ -227,11 +285,13 @@ function App() {
     setPeers([]);
     setIsMuted(false);
     setIsDeafened(false);
+    setIsVoiceActive(false);
+    setCurrentVolume(-100);
   };
 
   const joinRoom = async (room: Room) => {
     if (currentRoom) {
-      leaveRoom();
+      await leaveRoom();
     }
 
     if (!user) return;
@@ -254,6 +314,13 @@ function App() {
     localStreamRef.current = stream;
     const track = stream.getAudioTracks()[0];
     await mediasoupService.produceAudio(track);
+
+    // Init VAD
+    audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const source = audioContextRef.current.createMediaStreamSource(stream);
+    analyserRef.current = audioContextRef.current.createAnalyser();
+    analyserRef.current.fftSize = 256;
+    source.connect(analyserRef.current);
 
     setCurrentRoom(room);
   };
@@ -376,6 +443,73 @@ function App() {
     );
   }
 
+  if (activeTab === 'settings') {
+    return (
+      <div style={{ display: 'flex', height: '100vh', fontFamily: 'sans-serif', backgroundColor: '#36393f', color: 'white' }}>
+        <div style={{ width: '240px', backgroundColor: '#2f3136', padding: '40px 10px 10px 20px', display: 'flex', flexDirection: 'column', gap: '5px' }}>
+          <h4 style={{ color: '#8e9297', fontSize: '12px', textTransform: 'uppercase', marginBottom: '10px' }}>Настройки пользователя</h4>
+          <div style={{ padding: '8px', borderRadius: '4px', backgroundColor: '#4f545c', cursor: 'pointer' }}>Голос и видео</div>
+          <div style={{ padding: '8px', borderRadius: '4px', cursor: 'default', color: '#8e9297' }}>Профиль (Скоро)</div>
+          <div style={{ padding: '8px', borderRadius: '4px', cursor: 'default', color: '#8e9297' }}>Внешний вид (Скоро)</div>
+          <div style={{ marginTop: 'auto', borderTop: '1px solid #4f545c', paddingTop: '10px' }}>
+            <div onClick={handleLogout} style={{ padding: '8px', borderRadius: '4px', cursor: 'pointer', color: '#ed4245' }}>Выйти</div>
+          </div>
+        </div>
+        <div style={{ flex: 1, padding: '60px 40px', overflowY: 'auto', position: 'relative' }}>
+          <div onClick={() => setActiveTab('app')} style={{ position: 'absolute', top: '40px', right: '40px', width: '36px', height: '36px', borderRadius: '50%', border: '2px solid #b9bbbe', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#b9bbbe' }} title="ESC">✕</div>
+          <h2 style={{ marginBottom: '20px' }}>Голос и видео</h2>
+          <div style={{ marginBottom: '40px' }}>
+            <h4 style={{ color: '#b9bbbe', textTransform: 'uppercase', fontSize: '12px', marginBottom: '10px' }}>Чувствительность микрофона</h4>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '20px', backgroundColor: '#2f3136', padding: '20px', borderRadius: '8px' }}>
+              <div style={{ flex: 1 }}>
+                <input
+                  type="range"
+                  min="-100"
+                  max="0"
+                  value={voiceThreshold}
+                  onChange={(e) => {
+                    const val = Number(e.target.value);
+                    setVoiceThreshold(val);
+                    localStorage.setItem('voiceThreshold', String(val));
+                  }}
+                  style={{ width: '100%', cursor: 'pointer' }}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#8e9297', fontSize: '12px', marginTop: '5px' }}>
+                  <span>-100dB (Тихо)</span>
+                  <span>{voiceThreshold}dB</span>
+                  <span>0dB (Громко)</span>
+                </div>
+              </div>
+              <div style={{ width: '150px' }}>
+                <div style={{ height: '10px', backgroundColor: '#202225', borderRadius: '5px', overflow: 'hidden', position: 'relative' }}>
+                  <div style={{
+                    position: 'absolute',
+                    left: 0,
+                    top: 0,
+                    height: '100%',
+                    width: `${Math.max(0, currentVolume + 100)}%`,
+                    backgroundColor: currentVolume > voiceThreshold ? '#3ba55d' : '#8e9297',
+                    transition: 'width 0.1s ease-out'
+                  }} />
+                  <div style={{
+                    position: 'absolute',
+                    left: `${voiceThreshold + 100}%`,
+                    top: 0,
+                    height: '100%',
+                    width: '2px',
+                    backgroundColor: 'white'
+                  }} />
+                </div>
+                <div style={{ color: '#8e9297', fontSize: '10px', textAlign: 'center', marginTop: '5px' }}>Текущий уровень: {currentVolume}dB</div>
+              </div>
+            </div>
+            <p style={{ color: '#8e9297', fontSize: '14px', marginTop: '10px' }}>Микрофон будет активироваться только когда уровень звука превышает белый маркер.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: 'flex', height: '100vh', fontFamily: 'sans-serif', backgroundColor: '#2f3136', color: 'white' }}>
       {/* Sidebar: Guilds */}
@@ -389,7 +523,7 @@ function App() {
             </div>
           ))}
         </div>
-        <div onClick={() => setIsSettingsOpen(true)} style={{ ...guildIconStyle, marginTop: 'auto' }} title="Настройки">⚙️</div>
+        <div onClick={() => setActiveTab('settings')} style={{ ...guildIconStyle, marginTop: 'auto' }} title="Настройки">⚙️</div>
       </div>
 
       {/* Sidebar: Rooms */}
@@ -415,14 +549,18 @@ function App() {
               }}>
                 # {r.name}
               </div>
-              {currentRoom?.id === r.id && (
-                <div style={{ paddingLeft: '20px' }}>
-                  <UserAvatar username={user.username} isSpeaking={activeSpeaker === socket.id} isMuted={isMuted} isMe small />
-                  {peers.map(p => (
-                    <UserAvatar key={p.peerId} username={p.nickname} isSpeaking={activeSpeaker === p.peerId} small />
-                  ))}
-                </div>
-              )}
+              <div style={{ paddingLeft: '20px' }}>
+                {r.participants?.map(p => (
+                  <UserAvatar
+                    key={p.peerId}
+                    username={p.nickname}
+                    isSpeaking={p.peerId === socket.id ? isVoiceActive : activeSpeaker === p.peerId}
+                    isMuted={p.peerId === socket.id ? isMuted : false}
+                    isMe={p.peerId === socket.id}
+                    small
+                  />
+                ))}
+              </div>
             </div>
           ))}
         </div>
@@ -493,17 +631,6 @@ function App() {
         </div>
       )}
 
-      {/* Settings Modal */}
-      {isSettingsOpen && (
-        <div style={{ position: 'absolute', top: 0, left: 0, width: '100vw', height: '100vh', backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
-          <div style={{ backgroundColor: '#36393f', padding: '30px', borderRadius: '8px', minWidth: '300px', textAlign: 'center' }}>
-            <h3 style={{ marginTop: 0 }}>Настройки</h3>
-            <p>Аккаунт: <strong>{user.username}</strong></p>
-            <button onClick={() => { handleLogout(); setIsSettingsOpen(false); }} style={{ ...buttonStyle, backgroundColor: '#ed4245' }}>Выйти из аккаунта</button>
-            <button onClick={() => setIsSettingsOpen(false)} style={{ ...buttonStyle, backgroundColor: '#4f545c', marginTop: '10px' }}>Закрыть</button>
-          </div>
-        </div>
-      )}
 
       {/* Modal */}
       {isModalOpen && (
@@ -560,13 +687,13 @@ function UserAvatar({ username, isSpeaking, isMuted, isMe, small }: UserAvatarPr
   const dotSize = small ? '12px' : '20px';
 
   return (
-    <div style={{ display: small ? 'flex' : 'block', alignItems: 'center', textAlign: small ? 'left' : 'center', marginBottom: small ? '5px' : '0' }}>
+    <div style={{ display: small ? 'flex' : 'block', alignItems: 'center', textAlign: 'left', marginBottom: small ? '5px' : '15px' }}>
       <div style={{
         width: size,
         height: size,
         borderRadius: '50%',
         backgroundColor: '#5865f2',
-        margin: '0 auto 10px',
+        margin: small ? '0' : '0 auto 10px',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
