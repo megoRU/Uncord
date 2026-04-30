@@ -2,31 +2,74 @@ import React, { useState, useEffect, useRef } from 'react';
 import socket from './socket';
 import mediasoupService from './MediasoupService';
 
+interface User {
+  id: number;
+  username: string;
+}
+
+interface Guild {
+  id: number;
+  name: string;
+}
+
+interface Room {
+  id: number;
+  name: string;
+  guildId: number;
+}
+
+interface Peer {
+  peerId: string;
+  nickname: string;
+  producers?: { producerId: string; kind: string }[];
+}
+
+interface AuthResponse {
+  success: boolean;
+  user: User;
+  error?: string;
+}
+
+interface GetGuildsResponse {
+  success: boolean;
+  guilds: Guild[];
+}
+
+interface GetRoomsResponse {
+  success: boolean;
+  rooms: Room[];
+}
+
+interface GenericResponse {
+  success: boolean;
+  error?: string;
+}
+
 function App() {
-  const [user, setUser] = useState(null);
+  const [user, setUser] = useState<User | null>(null);
   const [isRegistering, setIsRegistering] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
 
-  const [guilds, setGuilds] = useState([]);
-  const [selectedGuild, setSelectedGuild] = useState(null);
-  const [rooms, setRooms] = useState([]);
-  const [currentRoom, setCurrentRoom] = useState(null);
+  const [guilds, setGuilds] = useState<Guild[]>([]);
+  const [selectedGuild, setSelectedGuild] = useState<Guild | null>(null);
+  const [rooms, setRooms] = useState<Room[]>([]);
+  const [currentRoom, setCurrentRoom] = useState<Room | null>(null);
 
-  const [peers, setPeers] = useState([]);
-  const [activeSpeaker, setActiveSpeaker] = useState(null);
+  const [peers, setPeers] = useState<Peer[]>([]);
+  const [activeSpeaker, setActiveSpeaker] = useState<string | null>(null);
   const [isMuted, setIsMuted] = useState(false);
-  const [onlineUsers, setOnlineUsers] = useState([]);
+  const [onlineUsers, setOnlineUsers] = useState<User[]>([]);
 
-  const localStreamRef = useRef(null);
-  const remoteAudiosRef = useRef({});
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const remoteAudiosRef = useRef<{ [peerId: string]: HTMLAudioElement }>({});
 
   useEffect(() => {
-    socket.on('peerJoined', ({ peerId, nickname }) => {
+    socket.on('peerJoined', ({ peerId, nickname }: { peerId: string; nickname: string }) => {
       setPeers(prev => [...prev, { peerId, nickname }]);
     });
 
-    socket.on('peerLeft', ({ peerId }) => {
+    socket.on('peerLeft', ({ peerId }: { peerId: string }) => {
       setPeers(prev => prev.filter(p => p.peerId !== peerId));
       if (remoteAudiosRef.current[peerId]) {
         remoteAudiosRef.current[peerId].remove();
@@ -34,11 +77,11 @@ function App() {
       }
     });
 
-    socket.on('newProducer', async ({ peerId, producerId }) => {
+    socket.on('newProducer', async ({ peerId, producerId }: { peerId: string; producerId: string }) => {
       await consumeProducer(producerId, peerId);
     });
 
-    socket.on('activeSpeaker', ({ peerId }) => {
+    socket.on('activeSpeaker', ({ peerId }: { peerId: string | null }) => {
       setActiveSpeaker(peerId);
     });
 
@@ -50,7 +93,7 @@ function App() {
     };
   }, []);
 
-  const consumeProducer = async (producerId, peerId) => {
+  const consumeProducer = async (producerId: string, peerId: string) => {
     await mediasoupService.consume(producerId, peerId, (track) => {
       const stream = new MediaStream([track]);
       const audio = new Audio();
@@ -63,7 +106,7 @@ function App() {
   const handleAuth = () => {
     socket.connect();
     const action = isRegistering ? 'register' : 'login';
-    socket.emit(action, { username, password }, (res) => {
+    socket.emit(action, { username, password }, (res: AuthResponse) => {
       if (res.success) {
         setUser(res.user);
         loadGuilds();
@@ -74,13 +117,13 @@ function App() {
   };
 
   const loadGuilds = () => {
-    socket.emit('getGuilds', (res) => {
+    socket.emit('getGuilds', (res: GetGuildsResponse) => {
       if (res.success) setGuilds(res.guilds);
     });
   };
 
-  const loadRooms = (guildId) => {
-    socket.emit('getRooms', { guildId }, (res) => {
+  const loadRooms = (guildId: number) => {
+    socket.emit('getRooms', { guildId }, (res: GetRoomsResponse) => {
       if (res.success) setRooms(res.rooms);
     });
   };
@@ -96,16 +139,14 @@ function App() {
 
     setCurrentRoom(null);
     setPeers([]);
-    // We would need to tell the server we left, but the current server logic handles it on disconnect
-    // or when joining a new room we can replace state.
-    // To properly leave without reload, we need a 'leaveRoom' event on server.
-    // For now, let's at least reset the local state.
   };
 
-  const joinRoom = async (room) => {
+  const joinRoom = async (room: Room) => {
     if (currentRoom) {
       leaveRoom();
     }
+
+    if (!user) return;
 
     const { peers: initialPeers } = await mediasoupService.joinRoom(room.id, user.username);
     setPeers(initialPeers.map(p => ({ peerId: p.peerId, nickname: p.nickname })));
@@ -131,7 +172,7 @@ function App() {
   };
 
   const updateOnlineUsers = () => {
-    socket.emit('getOnlineUsers', (users) => {
+    socket.emit('getOnlineUsers', (users: User[]) => {
       setOnlineUsers(users);
     });
   };
@@ -139,7 +180,7 @@ function App() {
   const createGuild = () => {
     const name = prompt('Название гильдии:');
     if (name) {
-      socket.emit('createGuild', { name }, (res) => {
+      socket.emit('createGuild', { name }, (res: GenericResponse) => {
         if (res.success) loadGuilds();
       });
     }
@@ -148,7 +189,7 @@ function App() {
   const createRoom = () => {
     const name = prompt('Название комнаты:');
     if (name && selectedGuild) {
-      socket.emit('createRoom', { name, guildId: selectedGuild.id }, (res) => {
+      socket.emit('createRoom', { name, guildId: selectedGuild.id }, (res: GenericResponse) => {
         if (res.success) loadRooms(selectedGuild.id);
       });
     }
@@ -254,7 +295,14 @@ function App() {
   );
 }
 
-function UserAvatar({ username, isSpeaking, isMuted, isMe }) {
+interface UserAvatarProps {
+  username: string;
+  isSpeaking?: boolean;
+  isMuted?: boolean;
+  isMe?: boolean;
+}
+
+function UserAvatar({ username, isSpeaking, isMuted, isMe }: UserAvatarProps) {
   return (
     <div style={{ textAlign: 'center' }}>
       <div style={{
@@ -278,7 +326,7 @@ function UserAvatar({ username, isSpeaking, isMuted, isMe }) {
   );
 }
 
-const inputStyle = {
+const inputStyle: React.CSSProperties = {
   padding: '10px',
   marginBottom: '10px',
   width: '250px',
@@ -288,7 +336,7 @@ const inputStyle = {
   color: 'white'
 };
 
-const buttonStyle = {
+const buttonStyle: React.CSSProperties = {
   padding: '10px 20px',
   backgroundColor: '#5865f2',
   color: 'white',
@@ -298,7 +346,7 @@ const buttonStyle = {
   fontWeight: 'bold'
 };
 
-const guildIconStyle = {
+const guildIconStyle: React.CSSProperties = {
   width: '48px',
   height: '48px',
   borderRadius: '50%',

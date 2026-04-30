@@ -1,12 +1,24 @@
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const mediasoup = require('mediasoup');
-const config = require('./config');
-const cors = require('cors');
-const bcrypt = require('bcryptjs');
-const sequelize = require('./database');
-const { User, Guild, Room } = require('./models');
+import express from 'express';
+import http from 'http';
+import { Server, Socket } from 'socket.io';
+import * as mediasoup from 'mediasoup';
+import config from './config.js';
+import cors from 'cors';
+import bcrypt from 'bcryptjs';
+import sequelize from './database.js';
+import { User, Guild, Room } from './models/index.js';
+import {
+  Worker,
+  Router,
+  AudioLevelObserver,
+  WebRtcTransport,
+  Producer,
+  Consumer,
+  RtpCapabilities,
+  DtlsParameters,
+  MediaKind,
+  RtpParameters
+} from 'mediasoup/node/lib/types.js';
 
 const app = express();
 app.use(cors());
@@ -19,9 +31,24 @@ const io = new Server(server, {
   }
 });
 
-let worker;
-const rooms = new Map(); // roomId -> { router, audioLevelObserver, participants: Map(socketId -> { nickname, transports, producers, consumers }) }
-const onlineUsers = new Map(); // socketId -> { userId, username }
+let worker: Worker;
+
+interface Participant {
+  nickname: string;
+  transports: Map<string, WebRtcTransport>;
+  producers: Map<string, Producer>;
+  consumers: Map<string, Consumer>;
+  roomId: string;
+}
+
+interface RoomData {
+  router: Router;
+  audioLevelObserver: AudioLevelObserver;
+  participants: Map<string, Participant>;
+}
+
+const rooms = new Map<string, RoomData>(); // roomId -> { router, audioLevelObserver, participants: Map(socketId -> Participant) }
+const onlineUsers = new Map<string, { userId: number; username: string }>(); // socketId -> { userId, username }
 
 async function createWorker() {
   worker = await mediasoup.createWorker(config.mediasoup.worker);
@@ -40,7 +67,7 @@ async function initDB() {
 initDB();
 createWorker();
 
-async function createWebRtcTransport(router) {
+async function createWebRtcTransport(router: Router) {
   const transport = await router.createWebRtcTransport(config.mediasoup.webRtcTransport);
 
   transport.on('dtlsstatechange', (dtlsState) => {
@@ -58,10 +85,15 @@ async function createWebRtcTransport(router) {
   };
 }
 
-io.on('connection', (socket) => {
+interface CustomSocket extends Socket {
+  userId?: number;
+  username?: string;
+}
+
+io.on('connection', (socket: CustomSocket) => {
   console.log('New connection:', socket.id);
 
-  socket.on('register', async ({ username, password }, callback) => {
+  socket.on('register', async ({ username, password }, callback: (res: any) => void) => {
     try {
       const hashedPassword = await bcrypt.hash(password, 10);
       const user = await User.create({ username, password: hashedPassword });
@@ -72,7 +104,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('login', async ({ username, password }, callback) => {
+  socket.on('login', async ({ username, password }, callback: (res: any) => void) => {
     try {
       const user = await User.findOne({ where: { username } });
       if (user && await bcrypt.compare(password, user.password)) {
@@ -89,7 +121,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('createGuild', async ({ name }, callback) => {
+  socket.on('createGuild', async ({ name }, callback: (res: any) => void) => {
     if (!socket.userId) return callback({ success: false, error: 'Unauthorized' });
     try {
       const guild = await Guild.create({ name, ownerId: socket.userId });
@@ -101,7 +133,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('getGuilds', async (callback) => {
+  socket.on('getGuilds', async (callback: (res: any) => void) => {
     try {
       const guilds = await Guild.findAll();
       callback({ success: true, guilds });
@@ -110,7 +142,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('createRoom', async ({ name, guildId }, callback) => {
+  socket.on('createRoom', async ({ name, guildId }, callback: (res: any) => void) => {
     if (!socket.userId) return callback({ success: false, error: 'Unauthorized' });
     try {
       const room = await Room.create({ name, guildId });
@@ -120,7 +152,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('getRooms', async ({ guildId }, callback) => {
+  socket.on('getRooms', async ({ guildId }, callback: (res: any) => void) => {
     try {
       const roomsList = await Room.findAll({ where: { guildId } });
       callback({ success: true, rooms: roomsList });
@@ -129,7 +161,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('joinRoom', async ({ roomId, nickname }, callback) => {
+  socket.on('joinRoom', async ({ roomId, nickname }, callback: (res: any) => void) => {
     roomId = String(roomId);
     console.log(`User ${nickname} (${socket.id}) joining room ${roomId}`);
 
@@ -143,7 +175,10 @@ io.on('connection', (socket) => {
 
       audioLevelObserver.on('volumes', (volumes) => {
         const { producer } = volumes[0];
-        for (const [peerId, peerData] of room.participants) {
+        const currentRoom = rooms.get(roomId);
+        if (!currentRoom) return;
+
+        for (const [peerId, peerData] of currentRoom.participants) {
           if (peerData.producers.has(producer.id)) {
             io.to(roomId).emit('activeSpeaker', { peerId, nickname: peerData.nickname });
             break;
@@ -175,11 +210,11 @@ io.on('connection', (socket) => {
 
     socket.to(roomId).emit('peerJoined', { peerId: socket.id, nickname });
 
-    const peerList = [];
+    const peerList: any[] = [];
     for (const [id, data] of room.participants) {
       if (id !== socket.id) {
         // Collect existing producers to inform the new user
-        const producers = [];
+        const producers: any[] = [];
         data.producers.forEach(p => {
           producers.push({ producerId: p.id, kind: p.kind });
         });
@@ -190,17 +225,17 @@ io.on('connection', (socket) => {
     callback({ rtpCapabilities: room.router.rtpCapabilities, peers: peerList });
   });
 
-  socket.on('createTransport', async (_, callback) => {
+  socket.on('createTransport', async (_, callback: (res: any) => void) => {
     const peer = Array.from(rooms.values()).find(r => r.participants.has(socket.id))?.participants.get(socket.id);
-    const room = rooms.get(peer?.roomId);
+    const room = rooms.get(peer?.roomId || '');
     if (!room) return;
 
     const { transport, params } = await createWebRtcTransport(room.router);
-    peer.transports.set(transport.id, transport);
+    peer?.transports.set(transport.id, transport);
     callback(params);
   });
 
-  socket.on('connectTransport', async ({ transportId, dtlsParameters }, callback) => {
+  socket.on('connectTransport', async ({ transportId, dtlsParameters }: { transportId: string; dtlsParameters: DtlsParameters }, callback: () => void) => {
     const peer = Array.from(rooms.values()).find(r => r.participants.has(socket.id))?.participants.get(socket.id);
     const transport = peer?.transports.get(transportId);
     if (transport) {
@@ -209,12 +244,12 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('produce', async ({ transportId, kind, rtpParameters }, callback) => {
+  socket.on('produce', async ({ transportId, kind, rtpParameters }: { transportId: string; kind: MediaKind; rtpParameters: RtpParameters }, callback: (res: any) => void) => {
     const peer = Array.from(rooms.values()).find(r => r.participants.has(socket.id))?.participants.get(socket.id);
-    const room = rooms.get(peer?.roomId);
+    const room = rooms.get(peer?.roomId || '');
     const transport = peer?.transports.get(transportId);
 
-    if (transport) {
+    if (transport && room && peer) {
       const producer = await transport.produce({ kind, rtpParameters });
       peer.producers.set(producer.id, producer);
 
@@ -228,22 +263,22 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('consume', async ({ transportId, producerId, rtpCapabilities }, callback) => {
+  socket.on('consume', async ({ transportId, producerId, rtpCapabilities }: { transportId: string; producerId: string; rtpCapabilities: RtpCapabilities }, callback: (res: any) => void) => {
     const peer = Array.from(rooms.values()).find(r => r.participants.has(socket.id))?.participants.get(socket.id);
-    const room = rooms.get(peer?.roomId);
+    const room = rooms.get(peer?.roomId || '');
     const transport = peer?.transports.get(transportId);
 
-    if (room && room.router.canConsume({ producerId, rtpCapabilities })) {
+    if (room && transport && room.router.canConsume({ producerId, rtpCapabilities })) {
       const consumer = await transport.consume({
         producerId,
         rtpCapabilities,
         paused: true,
       });
 
-      peer.consumers.set(consumer.id, consumer);
+      peer?.consumers.set(consumer.id, consumer);
 
       consumer.on('transportclose', () => {
-        peer.consumers.delete(consumer.id);
+        peer?.consumers.delete(consumer.id);
       });
 
       callback({
@@ -255,7 +290,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('resumeConsumer', async ({ consumerId }) => {
+  socket.on('resumeConsumer', async ({ consumerId }: { consumerId: string }) => {
     const peer = Array.from(rooms.values()).find(r => r.participants.has(socket.id))?.participants.get(socket.id);
     const consumer = peer?.consumers.get(consumerId);
     if (consumer) {
@@ -263,7 +298,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('getOnlineUsers', (callback) => {
+  socket.on('getOnlineUsers', (callback: (res: any) => void) => {
     callback(Array.from(onlineUsers.values()));
   });
 
@@ -273,9 +308,11 @@ io.on('connection', (socket) => {
     for (const [roomId, room] of rooms) {
       if (room.participants.has(socket.id)) {
         const peer = room.participants.get(socket.id);
-        peer.transports.forEach(t => t.close());
-        peer.producers.forEach(p => p.close());
-        peer.consumers.forEach(c => c.close());
+        if (peer) {
+          peer.transports.forEach(t => t.close());
+          peer.producers.forEach(p => p.close());
+          peer.consumers.forEach(c => c.close());
+        }
 
         room.participants.delete(socket.id);
         socket.to(roomId).emit('peerLeft', { peerId: socket.id });

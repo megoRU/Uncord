@@ -7,7 +7,7 @@ export default defineConfig({
   plugins: [
     react(),
     electron({
-      entry: 'main.js',
+      entry: 'main.ts',
     }),
   ],
 })

@@ -1,4 +1,30 @@
-module.exports = {
+import { WorkerLogLevel, WorkerLogTag, RtpCodecCapability, TransportListenIp } from 'mediasoup/node/lib/types.js';
+
+interface MediasoupConfig {
+  worker: {
+    rtcMinPort: number;
+    rtcMaxPort: number;
+    logLevel: WorkerLogLevel;
+    logTags: WorkerLogTag[];
+  };
+  router: {
+    mediaCodecs: RtpCodecCapability[];
+  };
+  webRtcTransport: {
+    listenIps: TransportListenIp[];
+    initialAvailableOutgoingBitrate: number;
+    minimumAvailableOutgoingBitrate: number;
+    maxSctpMessageSize: number;
+  };
+}
+
+interface Config {
+  listenIp: string;
+  listenPort: number;
+  mediasoup: MediasoupConfig;
+}
+
+const config: Config = {
   listenIp: '127.0.0.1',
   listenPort: 3000,
   mediasoup: {
@@ -32,7 +58,7 @@ module.exports = {
       listenIps: [
         {
           ip: '127.0.0.1',
-          announcedIp: null,
+          announcedIp: undefined,
         },
       ],
       initialAvailableOutgoingBitrate: 1000000,
@@ -41,3 +67,5 @@ module.exports = {
     },
   },
 };
+
+export default config;
