@@ -86,17 +86,48 @@ function App() {
   const remoteAudiosRef = useRef<{ [peerId: string]: HTMLAudioElement }>({});
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
+  const smoothedVolumeRef = useRef<number>(-100);
+  const silenceTimeoutRef = useRef<any>(null);
 
   useEffect(() => {
-    if (currentVolume > voiceThreshold) {
-      if (!isVoiceActive && !isMuted) {
-        setIsVoiceActive(true);
-        mediasoupService.resumeProducer();
+    const activateThreshold = voiceThreshold + 5;
+    const deactivateThreshold = voiceThreshold - 5;
+
+    // ВКЛЮЧЕНИЕ
+    if (!isVoiceActive && currentVolume > activateThreshold && !isMuted) {
+      setIsVoiceActive(true);
+      mediasoupService.resumeProducer();
+
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
+      return;
+    }
+
+    // ВЫКЛЮЧЕНИЕ С ЗАДЕРЖКОЙ (Release)
+    if (isVoiceActive && currentVolume < deactivateThreshold) {
+      if (!silenceTimeoutRef.current) {
+        silenceTimeoutRef.current = setTimeout(() => {
+          setIsVoiceActive(false);
+          mediasoupService.pauseProducer();
+          silenceTimeoutRef.current = null;
+        }, 300); // RELEASE_MS
       }
     } else {
-      if (isVoiceActive) {
-        setIsVoiceActive(false);
-        mediasoupService.pauseProducer();
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
+    }
+
+    // Обработка Mute (если замутились - сразу выключаем голос)
+    if (isMuted && isVoiceActive) {
+      setIsVoiceActive(false);
+      mediasoupService.pauseProducer();
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
       }
     }
   }, [currentVolume, voiceThreshold, isMuted, isVoiceActive]);
@@ -160,12 +191,6 @@ function App() {
 
     const checkVolume = () => {
       if (analyserRef.current) {
-        const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
-        analyserRef.current.getByteFrequencyData(dataArray);
-        let sum = 0;
-        for (let i = 0; i < dataArray.length; i++) {
-          sum += dataArray[i];
-        }
         // Get Time Domain Data for RMS
         const timeData = new Uint8Array(analyserRef.current.fftSize);
         analyserRef.current.getByteTimeDomainData(timeData);
@@ -178,9 +203,17 @@ function App() {
         const rms = Math.sqrt(sumSquares / timeData.length);
         let db = rms > 0 ? 20 * Math.log10(rms) : -100;
 
+        // Антишум
+        if (db < -80) db = -100;
+
         // Clamp
         db = Math.max(-100, Math.min(0, db));
-        setCurrentVolume(Math.round(db));
+
+        // Экспоненциальное сглаживание
+        const alpha = 0.2;
+        smoothedVolumeRef.current = smoothedVolumeRef.current * (1 - alpha) + db * alpha;
+
+        setCurrentVolume(Math.round(smoothedVolumeRef.current));
       }
       requestAnimationFrame(checkVolume);
     };
@@ -330,7 +363,8 @@ function App() {
     audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
     const source = audioContextRef.current.createMediaStreamSource(stream);
     analyserRef.current = audioContextRef.current.createAnalyser();
-    analyserRef.current.fftSize = 256;
+    analyserRef.current.fftSize = 512;
+    analyserRef.current.smoothingTimeConstant = 0.8;
     source.connect(analyserRef.current);
 
     setCurrentRoom(room);
@@ -479,7 +513,7 @@ function App() {
                   max="0"
                   value={voiceThreshold}
                   onChange={(e) => {
-                    const val = Number(e.target.value);
+                    const val = Math.max(-80, Math.min(-30, Number(e.target.value)));
                     setVoiceThreshold(val);
                     localStorage.setItem('voiceThreshold', String(val));
                   }}
@@ -515,6 +549,19 @@ function App() {
               </div>
             </div>
             <p style={{ color: '#8e9297', fontSize: '14px', marginTop: '10px' }}>Микрофон будет активироваться только когда уровень звука превышает белый маркер.</p>
+            <div style={{ marginTop: '20px' }}>
+              <button
+                onClick={() => {
+                  const noiseFloor = currentVolume;
+                  const threshold = Math.max(-80, Math.min(-30, noiseFloor + 10));
+                  setVoiceThreshold(threshold);
+                  localStorage.setItem('voiceThreshold', String(threshold));
+                }}
+                style={{ ...buttonStyle, width: 'auto', fontSize: '14px', padding: '10px 20px' }}
+              >
+                Определить чувствительность
+              </button>
+            </div>
           </div>
         </div>
       </div>
