@@ -166,9 +166,20 @@ function App() {
         for (let i = 0; i < dataArray.length; i++) {
           sum += dataArray[i];
         }
-        const average = sum / dataArray.length;
-        // Convert to dB-like scale (0-100 to roughly -100 to 0)
-        const db = average > 0 ? 20 * Math.log10(average / 255) : -100;
+        // Get Time Domain Data for RMS
+        const timeData = new Uint8Array(analyserRef.current.fftSize);
+        analyserRef.current.getByteTimeDomainData(timeData);
+
+        let sumSquares = 0;
+        for (let i = 0; i < timeData.length; i++) {
+          const normalized = (timeData[i] - 128) / 128; // Normalize to -1 to 1
+          sumSquares += normalized * normalized;
+        }
+        const rms = Math.sqrt(sumSquares / timeData.length);
+        let db = rms > 0 ? 20 * Math.log10(rms) : -100;
+
+        // Clamp
+        db = Math.max(-100, Math.min(0, db));
         setCurrentVolume(Math.round(db));
       }
       requestAnimationFrame(checkVolume);
