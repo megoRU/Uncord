@@ -57,10 +57,13 @@ const config: Config = {
     webRtcTransport: {
       listenIps: [
         {
-          ip: '0.0.0.0',
+          ip: '127.0.0.1',
           announcedIp: '127.0.0.1',
         },
       ],
+      enableUdp: true,
+      enableTcp: true,
+      preferUdp: true,
       initialAvailableOutgoingBitrate: 1000000,
       minimumAvailableOutgoingBitrate: 600000,
       maxSctpMessageSize: 262144,
