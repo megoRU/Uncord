@@ -15,6 +15,8 @@ function createWindow() {
     },
   });
 
+  win.removeMenu();
+
   // В разработке загружаем с порта Vite, в продакшене из билда
   if (process.env.VITE_DEV_SERVER_URL) {
     win.loadURL(process.env.VITE_DEV_SERVER_URL);

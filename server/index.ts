@@ -50,6 +50,10 @@ interface RoomData {
 const rooms = new Map<string, RoomData>(); // roomId -> { router, audioLevelObserver, participants: Map(socketId -> Participant) }
 const onlineUsers = new Map<string, { userId: number; username: string }>(); // socketId -> { userId, username }
 
+function broadcastOnlineUsers() {
+  io.emit('onlineUsersUpdate', Array.from(onlineUsers.values()));
+}
+
 async function createWorker() {
   worker = await mediasoup.createWorker(config.mediasoup.worker);
   worker.on('died', () => {
@@ -97,6 +101,12 @@ io.on('connection', (socket: CustomSocket) => {
     try {
       const hashedPassword = await bcrypt.hash(password, 10);
       const user = await User.create({ username, password: hashedPassword });
+
+      socket.userId = user.id;
+      socket.username = user.username;
+      onlineUsers.set(socket.id, { userId: user.id, username: user.username });
+      broadcastOnlineUsers();
+
       callback({ success: true, user: { id: user.id, username: user.username } });
     } catch (error) {
       console.error('Registration error:', error);
@@ -111,6 +121,7 @@ io.on('connection', (socket: CustomSocket) => {
         socket.userId = user.id;
         socket.username = user.username;
         onlineUsers.set(socket.id, { userId: user.id, username: user.username });
+        broadcastOnlineUsers();
         callback({ success: true, user: { id: user.id, username: user.username } });
       } else {
         callback({ success: false, error: 'Invalid credentials' });
@@ -305,6 +316,7 @@ io.on('connection', (socket: CustomSocket) => {
   socket.on('disconnect', () => {
     console.log('Socket disconnected:', socket.id);
     onlineUsers.delete(socket.id);
+    broadcastOnlineUsers();
     for (const [roomId, room] of rooms) {
       if (room.participants.has(socket.id)) {
         const peer = room.participants.get(socket.id);

@@ -85,11 +85,16 @@ function App() {
       setActiveSpeaker(peerId);
     });
 
+    socket.on('onlineUsersUpdate', (users: User[]) => {
+      setOnlineUsers(users);
+    });
+
     return () => {
       socket.off('peerJoined');
       socket.off('peerLeft');
       socket.off('newProducer');
       socket.off('activeSpeaker');
+      socket.off('onlineUsersUpdate');
     };
   }, []);
 
@@ -168,13 +173,6 @@ function App() {
     await mediasoupService.produceAudio(track);
 
     setCurrentRoom(room);
-    updateOnlineUsers();
-  };
-
-  const updateOnlineUsers = () => {
-    socket.emit('getOnlineUsers', (users: User[]) => {
-      setOnlineUsers(users);
-    });
   };
 
   const createGuild = () => {
@@ -205,14 +203,26 @@ function App() {
 
   if (!user) {
     return (
-      <div style={{ padding: '40px', textAlign: 'center', fontFamily: 'sans-serif', backgroundColor: '#36393f', color: 'white', height: '100vh' }}>
-        <h2>{isRegistering ? 'Регистрация' : 'Вход'}</h2>
-        <input placeholder="Имя пользователя" value={username} onChange={e => setUsername(e.target.value)} style={inputStyle} /><br/>
-        <input placeholder="Пароль" type="password" value={password} onChange={e => setPassword(e.target.value)} style={inputStyle} /><br/>
-        <button onClick={handleAuth} style={buttonStyle}>{isRegistering ? 'Зарегистрироваться' : 'Войти'}</button><br/>
-        <p onClick={() => setIsRegistering(!isRegistering)} style={{ cursor: 'pointer', color: '#00aff4' }}>
-          {isRegistering ? 'Уже есть аккаунт? Войти' : 'Нет аккаунта? Регистрация'}
-        </p>
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        justifyContent: 'center',
+        alignItems: 'center',
+        fontFamily: 'sans-serif',
+        backgroundColor: '#36393f',
+        color: 'white',
+        height: '100vh',
+        width: '100vw'
+      }}>
+        <div style={{ backgroundColor: '#2f3136', padding: '40px', borderRadius: '8px', boxShadow: '0 2px 10px rgba(0,0,0,0.2)', textAlign: 'center', minWidth: '400px' }}>
+          <h1 style={{ marginBottom: '30px', fontSize: '32px' }}>{isRegistering ? 'Регистрация' : 'Вход'}</h1>
+          <input placeholder="Имя пользователя" value={username} onChange={e => setUsername(e.target.value)} style={inputStyle} /><br/>
+          <input placeholder="Пароль" type="password" value={password} onChange={e => setPassword(e.target.value)} style={inputStyle} /><br/>
+          <button onClick={handleAuth} style={buttonStyle}>{isRegistering ? 'Зарегистрироваться' : 'Войти'}</button><br/>
+          <p onClick={() => setIsRegistering(!isRegistering)} style={{ cursor: 'pointer', color: '#00aff4', marginTop: '20px', fontSize: '16px' }}>
+            {isRegistering ? 'Уже есть аккаунт? Войти' : 'Нет аккаунта? Регистрация'}
+          </p>
+        </div>
       </div>
     );
   }
@@ -289,7 +299,6 @@ function App() {
             <span>{u.username}</span>
           </div>
         ))}
-        <button onClick={updateOnlineUsers} style={{ fontSize: '10px', marginTop: '10px' }}>Обновить список</button>
       </div>
     </div>
   );
@@ -327,23 +336,28 @@ function UserAvatar({ username, isSpeaking, isMuted, isMe }: UserAvatarProps) {
 }
 
 const inputStyle: React.CSSProperties = {
-  padding: '10px',
-  marginBottom: '10px',
-  width: '250px',
-  borderRadius: '3px',
+  padding: '15px',
+  marginBottom: '20px',
+  width: '100%',
+  boxSizing: 'border-box',
+  borderRadius: '5px',
   border: 'none',
   backgroundColor: '#202225',
-  color: 'white'
+  color: 'white',
+  fontSize: '18px'
 };
 
 const buttonStyle: React.CSSProperties = {
-  padding: '10px 20px',
+  padding: '15px 30px',
+  width: '100%',
   backgroundColor: '#5865f2',
   color: 'white',
   border: 'none',
-  borderRadius: '3px',
+  borderRadius: '5px',
   cursor: 'pointer',
-  fontWeight: 'bold'
+  fontWeight: 'bold',
+  fontSize: '18px',
+  marginTop: '10px'
 };
 
 const guildIconStyle: React.CSSProperties = {
