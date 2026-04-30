@@ -143,13 +143,36 @@ function App() {
   }, []);
 
   const consumeProducer = async (producerId: string, peerId: string) => {
-    await mediasoupService.consume(producerId, peerId, (track) => {
+    try {
+      const track = await mediasoupService.consume(producerId, peerId);
+
+      // Очистка предыдущего аудио для этого пира, если оно есть
+      if (remoteAudiosRef.current[peerId]) {
+        console.log(`Cleaning up old audio for peer ${peerId}`);
+        remoteAudiosRef.current[peerId].pause();
+        remoteAudiosRef.current[peerId].srcObject = null;
+        remoteAudiosRef.current[peerId].remove();
+      }
+
       const stream = new MediaStream([track]);
       const audio = new Audio();
       audio.srcObject = stream;
-      audio.play().catch(e => console.error('Audio play failed', e));
+      audio.muted = isDeafened; // Учитываем состояние "Заглушено"
+
+      console.log(`Attempting to play audio for peer ${peerId}, muted: ${audio.muted}`);
+      audio.play()
+        .then(() => console.log(`Successfully playing audio for peer ${peerId}`))
+        .catch(e => {
+          console.error(`Audio play failed for peer ${peerId}:`, e);
+          if (e.name === 'NotAllowedError') {
+            console.warn('Playback prevented by browser. User interaction might be required.');
+          }
+        });
+
       remoteAudiosRef.current[peerId] = audio;
-    });
+    } catch (error) {
+      console.error(`Failed to consume producer ${producerId} from peer ${peerId}:`, error);
+    }
   };
 
   const handleAuth = () => {

@@ -79,7 +79,14 @@ async function createWebRtcTransport(router: Router) {
   const transport = await router.createWebRtcTransport(config.mediasoup.webRtcTransport);
 
   transport.on('dtlsstatechange', (dtlsState) => {
-    if (dtlsState === 'closed') transport.close();
+    console.log(`Transport ${transport.id} DTLS state change: ${dtlsState}`);
+    if (dtlsState === 'closed' || dtlsState === 'failed') {
+      transport.close();
+    }
+  });
+
+  transport.on('iceselectedtuplechange', (iceSelectedTuple) => {
+    console.log(`Transport ${transport.id} ICE selected tuple change:`, iceSelectedTuple);
   });
 
   return {
@@ -218,6 +225,7 @@ io.on('connection', (socket: CustomSocket) => {
       });
 
       audioLevelObserver.on('volumes', (volumes) => {
+        if (volumes.length === 0) return;
         const { producer } = volumes[0];
         const currentRoom = rooms.get(roomId);
         if (!currentRoom) return;
@@ -331,6 +339,8 @@ io.on('connection', (socket: CustomSocket) => {
         kind: consumer.kind,
         rtpParameters: consumer.rtpParameters,
       });
+    } else {
+      callback({ error: 'Cannot consume' });
     }
   });
 
