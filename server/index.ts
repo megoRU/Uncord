@@ -51,7 +51,11 @@ const rooms = new Map<string, RoomData>(); // roomId -> { router, audioLevelObse
 const onlineUsers = new Map<string, { userId: number; username: string }>(); // socketId -> { userId, username }
 
 function broadcastOnlineUsers() {
-  io.emit('onlineUsersUpdate', Array.from(onlineUsers.values()));
+  const uniqueUsers = new Map<number, { userId: number; username: string }>();
+  for (const user of onlineUsers.values()) {
+    uniqueUsers.set(user.userId, user);
+  }
+  io.emit('onlineUsersUpdate', Array.from(uniqueUsers.values()));
 }
 
 async function createWorker() {
@@ -114,10 +118,10 @@ io.on('connection', (socket: CustomSocket) => {
     }
   });
 
-  socket.on('login', async ({ username, password }, callback: (res: any) => void) => {
+  socket.on('login', async ({ username, password, autoLogin }, callback: (res: any) => void) => {
     try {
       const user = await User.findOne({ where: { username } });
-      if (user && await bcrypt.compare(password, user.password)) {
+      if (user && (autoLogin || (password && await bcrypt.compare(password, user.password)))) {
         socket.userId = user.id;
         socket.username = user.username;
         onlineUsers.set(socket.id, { userId: user.id, username: user.username });
@@ -311,6 +315,10 @@ io.on('connection', (socket: CustomSocket) => {
 
   socket.on('getOnlineUsers', (callback: (res: any) => void) => {
     callback(Array.from(onlineUsers.values()));
+  });
+
+  socket.on('ping', (callback: () => void) => {
+    callback();
   });
 
   socket.on('disconnect', () => {

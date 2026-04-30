@@ -48,6 +48,7 @@ interface GenericResponse {
 function App() {
   const [user, setUser] = useState<User | null>(null);
   const [isRegistering, setIsRegistering] = useState(false);
+  const [isInitialAuthChecked, setIsInitialAuthChecked] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
 
@@ -56,15 +57,55 @@ function App() {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [currentRoom, setCurrentRoom] = useState<Room | null>(null);
 
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [modalTitle, setModalTitle] = useState('');
+  const [modalValue, setModalValue] = useState('');
+  const [modalAction, setModalAction] = useState<((val: string) => void) | null>(null);
+
   const [peers, setPeers] = useState<Peer[]>([]);
   const [activeSpeaker, setActiveSpeaker] = useState<string | null>(null);
   const [isMuted, setIsMuted] = useState(false);
+  const [isDeafened, setIsDeafened] = useState(false);
   const [onlineUsers, setOnlineUsers] = useState<User[]>([]);
+  const [ping, setPing] = useState<number | null>(null);
+  const [showDebug, setShowDebug] = useState(false);
 
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteAudiosRef = useRef<{ [peerId: string]: HTMLAudioElement }>({});
 
   useEffect(() => {
+    let pingInterval: any;
+    if (user) {
+      pingInterval = setInterval(() => {
+        const start = Date.now();
+        socket.emit('ping', () => {
+          setPing(Date.now() - start);
+        });
+      }, 3000);
+    }
+    return () => clearInterval(pingInterval);
+  }, [user]);
+
+  useEffect(() => {
+    const savedUser = localStorage.getItem('user');
+    if (savedUser) {
+      const parsedUser = JSON.parse(savedUser);
+      setUser(parsedUser);
+      socket.connect();
+      // Inform server about existing session
+      socket.emit('login', { username: parsedUser.username, autoLogin: true }, (res: AuthResponse) => {
+        if (res.success) {
+          loadGuilds();
+        } else {
+          localStorage.removeItem('user');
+          setUser(null);
+        }
+        setIsInitialAuthChecked(true);
+      });
+    } else {
+      setIsInitialAuthChecked(true);
+    }
+
     socket.on('peerJoined', ({ peerId, nickname }: { peerId: string; nickname: string }) => {
       setPeers(prev => [...prev, { peerId, nickname }]);
     });
@@ -114,11 +155,18 @@ function App() {
     socket.emit(action, { username, password }, (res: AuthResponse) => {
       if (res.success) {
         setUser(res.user);
+        localStorage.setItem('user', JSON.stringify(res.user));
         loadGuilds();
       } else {
         alert(res.error);
       }
     });
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('user');
+    setUser(null);
+    socket.disconnect();
   };
 
   const loadGuilds = () => {
@@ -176,21 +224,26 @@ function App() {
   };
 
   const createGuild = () => {
-    const name = prompt('Название гильдии:');
-    if (name) {
+    setModalTitle('Создать гильдию');
+    setModalValue('');
+    setModalAction(() => (name: string) => {
       socket.emit('createGuild', { name }, (res: GenericResponse) => {
         if (res.success) loadGuilds();
       });
-    }
+    });
+    setIsModalOpen(true);
   };
 
   const createRoom = () => {
-    const name = prompt('Название комнаты:');
-    if (name && selectedGuild) {
+    if (!selectedGuild) return;
+    setModalTitle('Создать комнату');
+    setModalValue('');
+    setModalAction(() => (name: string) => {
       socket.emit('createRoom', { name, guildId: selectedGuild.id }, (res: GenericResponse) => {
         if (res.success) loadRooms(selectedGuild.id);
       });
-    }
+    });
+    setIsModalOpen(true);
   };
 
   const toggleMute = () => {
@@ -198,8 +251,32 @@ function App() {
       const track = localStreamRef.current.getAudioTracks()[0];
       track.enabled = !track.enabled;
       setIsMuted(!track.enabled);
+    } else {
+      setIsMuted(!isMuted);
     }
   };
+
+  const toggleDeafen = () => {
+    const nextDeafened = !isDeafened;
+    setIsDeafened(nextDeafened);
+
+    // Если звук выключен, микрофон тоже должен мутиться
+    if (nextDeafened) {
+      if (localStreamRef.current) {
+        localStreamRef.current.getAudioTracks()[0].enabled = false;
+      }
+      setIsMuted(true);
+    }
+
+    // Управление громкостью удаленных аудио
+    Object.values(remoteAudiosRef.current).forEach(audio => {
+      audio.muted = nextDeafened;
+    });
+  };
+
+  if (!isInitialAuthChecked) {
+    return <div style={{ backgroundColor: '#36393f', height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white' }}>Загрузка...</div>;
+  }
 
   if (!user) {
     return (
@@ -245,7 +322,7 @@ function App() {
           {selectedGuild ? selectedGuild.name : 'Выберите гильдию'}
         </div>
         <div style={{ flex: 1, padding: '10px' }}>
-          {selectedGuild && <button onClick={createRoom} style={{ ...buttonStyle, width: '100%', marginBottom: '10px' }}>+ Создать комнату</button>}
+          {selectedGuild && <button onClick={createRoom} style={{ ...buttonStyle, width: '100%', marginBottom: '10px', fontSize: '14px', padding: '8px' }}>Создать комнату</button>}
           {rooms.map(r => (
             <div key={r.id} onClick={() => joinRoom(r)} style={{
               padding: '8px',
@@ -258,13 +335,31 @@ function App() {
             </div>
           ))}
         </div>
-        <div style={{ padding: '10px', backgroundColor: '#292b2f', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <span>{user.username}</span>
-          {currentRoom && (
-            <button onClick={toggleMute} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '20px' }}>
+        <div style={{ padding: '10px', backgroundColor: '#292b2f', display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative' }}>
+          <div
+            onClick={() => setShowDebug(!showDebug)}
+            style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginRight: '5px', cursor: 'pointer' }}
+            title="Показать отладку"
+          >
+            {user.username}
+          </div>
+          {showDebug && (
+            <div style={{ position: 'absolute', bottom: '100%', left: '10px', backgroundColor: '#202225', padding: '10px', borderRadius: '4px', fontSize: '12px', zIndex: 100, border: '1px solid #4f545c' }}>
+              <div>Server IP: localhost (3000)</div>
+              <div>Ping: {ping}ms</div>
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: '5px' }}>
+            <button onClick={toggleMute} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', padding: '2px' }} title={isMuted ? 'Включить микрофон' : 'Выключить микрофон'}>
               {isMuted ? '🔇' : '🎙️'}
             </button>
-          )}
+            <button onClick={toggleDeafen} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', padding: '2px' }} title={isDeafened ? 'Включить звук' : 'Выключить звук'}>
+              {isDeafened ? '🔈❌' : '🎧'}
+            </button>
+            <button onClick={handleLogout} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', padding: '2px' }} title="Выйти">
+              🚪
+            </button>
+          </div>
         </div>
       </div>
 
@@ -287,6 +382,31 @@ function App() {
           </div>
         )}
       </div>
+
+      {/* Modal */}
+      {isModalOpen && (
+        <div style={{ position: 'absolute', top: 0, left: 0, width: '100vw', height: '100vh', backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ backgroundColor: '#36393f', padding: '30px', borderRadius: '8px', minWidth: '300px', textAlign: 'center' }}>
+            <h3 style={{ marginTop: 0 }}>{modalTitle}</h3>
+            <input
+              value={modalValue}
+              onChange={e => setModalValue(e.target.value)}
+              placeholder="Введите название"
+              style={{ ...inputStyle, marginBottom: '20px' }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && modalValue) {
+                  modalAction?.(modalValue);
+                  setIsModalOpen(false);
+                }
+              }}
+            />
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
+              <button onClick={() => { modalAction?.(modalValue); setIsModalOpen(false); }} style={{ ...buttonStyle, width: 'auto', flex: 1 }}>ОК</button>
+              <button onClick={() => setIsModalOpen(false)} style={{ ...buttonStyle, width: 'auto', flex: 1, backgroundColor: '#4f545c' }}>Отмена</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Online Users List */}
       <div style={{ width: '200px', backgroundColor: '#2f3136', padding: '10px', borderLeft: '1px solid #202225' }}>
