@@ -4,6 +4,9 @@ const { Server } = require('socket.io');
 const mediasoup = require('mediasoup');
 const config = require('./config');
 const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const sequelize = require('./database');
+const { User, Guild, Room } = require('./models');
 
 const app = express();
 app.use(cors());
@@ -18,6 +21,7 @@ const io = new Server(server, {
 
 let worker;
 const rooms = new Map(); // roomId -> { router, audioLevelObserver, participants: Map(socketId -> { nickname, transports, producers, consumers }) }
+const onlineUsers = new Map(); // socketId -> { userId, username }
 
 async function createWorker() {
   worker = await mediasoup.createWorker(config.mediasoup.worker);
@@ -28,6 +32,12 @@ async function createWorker() {
   console.log('mediasoup worker created');
 }
 
+async function initDB() {
+  await sequelize.sync();
+  console.log('Database synced');
+}
+
+initDB();
 createWorker();
 
 async function createWebRtcTransport(router) {
@@ -51,7 +61,76 @@ async function createWebRtcTransport(router) {
 io.on('connection', (socket) => {
   console.log('New connection:', socket.id);
 
+  socket.on('register', async ({ username, password }, callback) => {
+    try {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      const user = await User.create({ username, password: hashedPassword });
+      callback({ success: true, user: { id: user.id, username: user.username } });
+    } catch (error) {
+      console.error('Registration error:', error);
+      callback({ success: false, error: 'User already exists or other error' });
+    }
+  });
+
+  socket.on('login', async ({ username, password }, callback) => {
+    try {
+      const user = await User.findOne({ where: { username } });
+      if (user && await bcrypt.compare(password, user.password)) {
+        socket.userId = user.id;
+        socket.username = user.username;
+        onlineUsers.set(socket.id, { userId: user.id, username: user.username });
+        callback({ success: true, user: { id: user.id, username: user.username } });
+      } else {
+        callback({ success: false, error: 'Invalid credentials' });
+      }
+    } catch (error) {
+      console.error('Login error:', error);
+      callback({ success: false, error: 'Login failed' });
+    }
+  });
+
+  socket.on('createGuild', async ({ name }, callback) => {
+    if (!socket.userId) return callback({ success: false, error: 'Unauthorized' });
+    try {
+      const guild = await Guild.create({ name, ownerId: socket.userId });
+      // Create a default room for the guild
+      await Room.create({ name: 'Общий', guildId: guild.id });
+      callback({ success: true, guild });
+    } catch (error) {
+      callback({ success: false, error: 'Failed to create guild' });
+    }
+  });
+
+  socket.on('getGuilds', async (callback) => {
+    try {
+      const guilds = await Guild.findAll();
+      callback({ success: true, guilds });
+    } catch (error) {
+      callback({ success: false, error: 'Failed to get guilds' });
+    }
+  });
+
+  socket.on('createRoom', async ({ name, guildId }, callback) => {
+    if (!socket.userId) return callback({ success: false, error: 'Unauthorized' });
+    try {
+      const room = await Room.create({ name, guildId });
+      callback({ success: true, room });
+    } catch (error) {
+      callback({ success: false, error: 'Failed to create room' });
+    }
+  });
+
+  socket.on('getRooms', async ({ guildId }, callback) => {
+    try {
+      const roomsList = await Room.findAll({ where: { guildId } });
+      callback({ success: true, rooms: roomsList });
+    } catch (error) {
+      callback({ success: false, error: 'Failed to get rooms' });
+    }
+  });
+
   socket.on('joinRoom', async ({ roomId, nickname }, callback) => {
+    roomId = String(roomId);
     console.log(`User ${nickname} (${socket.id}) joining room ${roomId}`);
 
     let room = rooms.get(roomId);
@@ -184,8 +263,13 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('getOnlineUsers', (callback) => {
+    callback(Array.from(onlineUsers.values()));
+  });
+
   socket.on('disconnect', () => {
     console.log('Socket disconnected:', socket.id);
+    onlineUsers.delete(socket.id);
     for (const [roomId, room] of rooms) {
       if (room.participants.has(socket.id)) {
         const peer = room.participants.get(socket.id);
