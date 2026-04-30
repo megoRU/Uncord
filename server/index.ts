@@ -6,7 +6,7 @@ import config from './config.js';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import sequelize from './database.js';
-import { User, Guild, Room } from './models/index.js';
+import { User, Guild, Room, GuildMember, Invitation } from './models/index.js';
 import {
   Worker,
   Router,
@@ -162,6 +162,8 @@ io.on('connection', (socket: CustomSocket) => {
     if (!socket.userId) return callback({ success: false, error: 'Unauthorized' });
     try {
       const guild = await Guild.create({ name, ownerId: socket.userId });
+      // Add creator as member
+      await GuildMember.create({ guildId: guild.id, userId: socket.userId });
       // Create a default room for the guild
       await Room.create({ name: 'Общий', guildId: guild.id });
       callback({ success: true, guild });
@@ -171,8 +173,11 @@ io.on('connection', (socket: CustomSocket) => {
   });
 
   socket.on('getGuilds', async (callback: (res: any) => void) => {
+    if (!socket.userId) return callback({ success: false, error: 'Unauthorized' });
     try {
-      const guilds = await Guild.findAll();
+      const memberships = await GuildMember.findAll({ where: { userId: socket.userId } });
+      const guildIds = memberships.map(m => m.guildId);
+      const guilds = await Guild.findAll({ where: { id: guildIds } });
       callback({ success: true, guilds });
     } catch (error) {
       callback({ success: false, error: 'Failed to get guilds' });
@@ -339,6 +344,68 @@ io.on('connection', (socket: CustomSocket) => {
 
   socket.on('getOnlineUsers', (callback: (res: any) => void) => {
     callback(Array.from(onlineUsers.values()));
+  });
+
+  socket.on('createInvite', async ({ guildId }, callback: (res: any) => void) => {
+    if (!socket.userId) return callback({ success: false, error: 'Unauthorized' });
+    try {
+      const guild = await Guild.findByPk(guildId);
+      if (!guild || guild.ownerId !== socket.userId) {
+        return callback({ success: false, error: 'Only owner can create invites' });
+      }
+      const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+      const invitation = await Invitation.create({ code, guildId, creatorId: socket.userId });
+      callback({ success: true, invitation });
+    } catch (error) {
+      callback({ success: false, error: 'Failed to create invite' });
+    }
+  });
+
+  socket.on('getInvites', async ({ guildId }, callback: (res: any) => void) => {
+    if (!socket.userId) return callback({ success: false, error: 'Unauthorized' });
+    try {
+      const invites = await Invitation.findAll({ where: { guildId } });
+      callback({ success: true, invites });
+    } catch (error) {
+      callback({ success: false, error: 'Failed to get invites' });
+    }
+  });
+
+  socket.on('deleteInvite', async ({ inviteId }, callback: (res: any) => void) => {
+    if (!socket.userId) return callback({ success: false, error: 'Unauthorized' });
+    try {
+      const invite = await Invitation.findByPk(inviteId);
+      if (!invite) return callback({ success: false, error: 'Invite not found' });
+
+      const guild = await Guild.findByPk(invite.guildId);
+      if (!guild || guild.ownerId !== socket.userId) {
+        return callback({ success: false, error: 'Permission denied' });
+      }
+
+      await invite.destroy();
+      callback({ success: true });
+    } catch (error) {
+      callback({ success: false, error: 'Failed to delete invite' });
+    }
+  });
+
+  socket.on('joinByInvite', async ({ code }, callback: (res: any) => void) => {
+    if (!socket.userId) return callback({ success: false, error: 'Unauthorized' });
+    try {
+      const invite = await Invitation.findOne({ where: { code } });
+      if (!invite) return callback({ success: false, error: 'Invalid invite code' });
+
+      const [membership, created] = await GuildMember.findOrCreate({
+        where: { guildId: invite.guildId, userId: socket.userId }
+      });
+
+      if (!created) return callback({ success: false, error: 'Already a member' });
+
+      const guild = await Guild.findByPk(invite.guildId);
+      callback({ success: true, guild });
+    } catch (error) {
+      callback({ success: false, error: 'Failed to join guild' });
+    }
   });
 
   socket.on('ping', (callback: () => void) => {

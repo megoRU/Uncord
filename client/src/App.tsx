@@ -62,6 +62,8 @@ function App() {
   const [modalValue, setModalValue] = useState('');
   const [modalAction, setModalAction] = useState<((val: string) => void) | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isInviteManagerOpen, setIsSettingsInviteManagerOpen] = useState(false);
+  const [invites, setInvites] = useState<{ id: number; code: string }[]>([]);
 
   const [peers, setPeers] = useState<Peer[]>([]);
   const [activeSpeaker, setActiveSpeaker] = useState<string | null>(null);
@@ -172,7 +174,11 @@ function App() {
 
   const loadGuilds = () => {
     socket.emit('getGuilds', (res: GetGuildsResponse) => {
-      if (res.success) setGuilds(res.guilds);
+      if (res.success) {
+        setGuilds(res.guilds);
+      } else {
+        setGuilds([]);
+      }
     });
   };
 
@@ -238,6 +244,43 @@ function App() {
       });
     });
     setIsModalOpen(true);
+  };
+
+  const joinByInvite = () => {
+    setModalTitle('Вступить по приглашению');
+    setModalValue('');
+    setModalAction(() => (code: string) => {
+      socket.emit('joinByInvite', { code }, (res: { success: boolean; guild?: Guild; error?: string }) => {
+        if (res.success) {
+          loadGuilds();
+          if (res.guild) {
+            setSelectedGuild(res.guild);
+            loadRooms(res.guild.id);
+          }
+        } else {
+          alert(res.error || 'Ошибка вступления');
+        }
+      });
+    });
+    setIsModalOpen(true);
+  };
+
+  const loadInvites = (guildId: number) => {
+    socket.emit('getInvites', { guildId }, (res: { success: boolean; invites: any[] }) => {
+      if (res.success) setInvites(res.invites);
+    });
+  };
+
+  const createInvite = (guildId: number) => {
+    socket.emit('createInvite', { guildId }, (res: { success: boolean }) => {
+      if (res.success) loadInvites(guildId);
+    });
+  };
+
+  const deleteInvite = (inviteId: number, guildId: number) => {
+    socket.emit('deleteInvite', { inviteId }, (res: { success: boolean }) => {
+      if (res.success) loadInvites(guildId);
+    });
   };
 
   const createRoom = () => {
@@ -316,6 +359,7 @@ function App() {
       <div style={{ width: '70px', backgroundColor: '#202225', padding: '10px', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
         <div style={{ flex: 1, width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
           <div onClick={createGuild} style={guildIconStyle} title="Создать гильдию">+</div>
+          <div onClick={joinByInvite} style={{ ...guildIconStyle, backgroundColor: '#3ba55d' }} title="Вступить по приглашению">🔗</div>
           {guilds.map(g => (
             <div key={g.id} onClick={() => { setSelectedGuild(g); loadRooms(g.id); }} style={{ ...guildIconStyle, backgroundColor: selectedGuild?.id === g.id ? '#5865f2' : '#36393f' }}>
               {g.name[0]}
@@ -327,20 +371,35 @@ function App() {
 
       {/* Sidebar: Rooms */}
       <div style={{ width: '240px', backgroundColor: '#2f3136', display: 'flex', flexDirection: 'column' }}>
-        <div style={{ padding: '20px', borderBottom: '1px solid #202225', fontWeight: 'bold' }}>
-          {selectedGuild ? selectedGuild.name : 'Выберите гильдию'}
+        <div style={{ padding: '20px', borderBottom: '1px solid #202225', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>{selectedGuild ? selectedGuild.name : 'Выберите гильдию'}</span>
         </div>
-        <div style={{ flex: 1, padding: '10px' }}>
-          {selectedGuild && <button onClick={createRoom} style={{ ...buttonStyle, width: '100%', marginBottom: '10px', fontSize: '14px', padding: '8px' }}>Создать комнату</button>}
+        <div style={{ flex: 1, padding: '10px', overflowY: 'auto' }}>
+          {selectedGuild && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '5px', marginBottom: '15px' }}>
+              <button onClick={() => { loadInvites(selectedGuild.id); setIsSettingsInviteManagerOpen(true); }} style={{ ...buttonStyle, fontSize: '14px', padding: '8px', backgroundColor: '#4f545c' }}>Управление приглашениями</button>
+              <button onClick={createRoom} style={{ ...buttonStyle, fontSize: '14px', padding: '8px' }}>Создать комнату</button>
+            </div>
+          )}
           {rooms.map(r => (
-            <div key={r.id} onClick={() => joinRoom(r)} style={{
-              padding: '8px',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              backgroundColor: currentRoom?.id === r.id ? '#4f545c' : 'transparent',
-              marginBottom: '2px'
-            }}>
-              # {r.name}
+            <div key={r.id} style={{ marginBottom: '10px' }}>
+              <div onClick={() => joinRoom(r)} style={{
+                padding: '8px',
+                borderRadius: '4px',
+                cursor: 'pointer',
+                backgroundColor: currentRoom?.id === r.id ? '#4f545c' : 'transparent',
+                marginBottom: '2px'
+              }}>
+                # {r.name}
+              </div>
+              {currentRoom?.id === r.id && (
+                <div style={{ paddingLeft: '20px' }}>
+                  <UserAvatar username={user.username} isSpeaking={activeSpeaker === socket.id} isMuted={isMuted} isMe small />
+                  {peers.map(p => (
+                    <UserAvatar key={p.peerId} username={p.nickname} isSpeaking={activeSpeaker === p.peerId} small />
+                  ))}
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -374,16 +433,13 @@ function App() {
         </div>
       </div>
 
-      {/* Main Area: Voice status and Users */}
+      {/* Main Area: Chat Placeholder */}
       <div style={{ flex: 1, backgroundColor: '#36393f', padding: '20px', display: 'flex', flexDirection: 'column' }}>
-        {currentRoom ? (
+        {selectedGuild ? (
           <>
-            <h3>В канале: {currentRoom.name}</h3>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(100px, 1fr))', gap: '20px' }}>
-              <UserAvatar username={user.username} isSpeaking={activeSpeaker === socket.id} isMuted={isMuted} isMe />
-              {peers.map(p => (
-                <UserAvatar key={p.peerId} username={p.nickname} isSpeaking={activeSpeaker === p.peerId} />
-              ))}
+            <h3>{currentRoom ? `Канал: ${currentRoom.name}` : 'Выберите канал'}</h3>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8e9297', border: '1px dashed #4f545c', borderRadius: '8px' }}>
+              Чат пока не доступен (Функция в разработке)
             </div>
           </>
         ) : (
@@ -393,6 +449,26 @@ function App() {
           </div>
         )}
       </div>
+
+      {/* Invite Manager Modal */}
+      {isInviteManagerOpen && selectedGuild && (
+        <div style={{ position: 'absolute', top: 0, left: 0, width: '100vw', height: '100vh', backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ backgroundColor: '#36393f', padding: '30px', borderRadius: '8px', minWidth: '400px' }}>
+            <h3>Приглашения: {selectedGuild.name}</h3>
+            <button onClick={() => createInvite(selectedGuild.id)} style={{ ...buttonStyle, marginBottom: '20px' }}>Создать новую ссылку</button>
+            <div style={{ maxHeight: '200px', overflowY: 'auto', textAlign: 'left' }}>
+              {invites.map(inv => (
+                <div key={inv.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px', backgroundColor: '#2f3136', borderRadius: '4px', marginBottom: '5px' }}>
+                  <code>{inv.code}</code>
+                  <button onClick={() => deleteInvite(inv.id, selectedGuild.id)} style={{ backgroundColor: '#ed4245', border: 'none', color: 'white', padding: '5px 10px', borderRadius: '4px', cursor: 'pointer' }}>Удалить</button>
+                </div>
+              ))}
+              {invites.length === 0 && <p style={{ color: '#8e9297' }}>Нет активных приглашений</p>}
+            </div>
+            <button onClick={() => setIsSettingsInviteManagerOpen(false)} style={{ ...buttonStyle, backgroundColor: '#4f545c', marginTop: '20px' }}>Закрыть</button>
+          </div>
+        </div>
+      )}
 
       {/* Settings Modal */}
       {isSettingsOpen && (
@@ -452,22 +528,27 @@ interface UserAvatarProps {
   isSpeaking?: boolean;
   isMuted?: boolean;
   isMe?: boolean;
+  small?: boolean;
 }
 
-function UserAvatar({ username, isSpeaking, isMuted, isMe }: UserAvatarProps) {
+function UserAvatar({ username, isSpeaking, isMuted, isMe, small }: UserAvatarProps) {
+  const size = small ? '32px' : '60px';
+  const fontSize = small ? '14px' : '24px';
+  const dotSize = small ? '12px' : '20px';
+
   return (
-    <div style={{ textAlign: 'center' }}>
+    <div style={{ display: small ? 'flex' : 'block', alignItems: 'center', textAlign: small ? 'left' : 'center', marginBottom: small ? '5px' : '0' }}>
       <div style={{
-        width: '60px',
-        height: '60px',
+        width: size,
+        height: size,
         borderRadius: '50%',
         backgroundColor: '#5865f2',
         margin: '0 auto 10px',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        fontSize: '24px',
-        border: isSpeaking ? '4px solid #3ba55d' : '4px solid transparent',
+        fontSize: fontSize,
+        border: isSpeaking ? (small ? '2px solid #3ba55d' : '4px solid #3ba55d') : (small ? '2px solid transparent' : '4px solid transparent'),
         position: 'relative'
       }}>
         {username[0]}
@@ -478,18 +559,18 @@ function UserAvatar({ username, isSpeaking, isMuted, isMe }: UserAvatarProps) {
             right: 0,
             backgroundColor: '#ed4245',
             borderRadius: '50%',
-            width: '20px',
-            height: '20px',
+            width: dotSize,
+            height: dotSize,
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            fontSize: '12px'
+            fontSize: small ? '8px' : '12px'
           }}>
             /
           </div>
         )}
       </div>
-      <div>{username} {isMe && '(Вы)'}</div>
+      <div style={{ marginLeft: small ? '10px' : '0', fontSize: small ? '14px' : 'inherit' }}>{username} {isMe && '(Вы)'}</div>
     </div>
   );
 }

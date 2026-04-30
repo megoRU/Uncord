@@ -50,6 +50,7 @@ class MediasoupService {
     return new Promise((resolve) => {
       socket.emit('createTransport', {}, async (params: TransportOptions) => {
         if (!this.device) return;
+        console.log('Creating send transport with params:', params);
         this.sendTransport = this.device.createSendTransport(params);
 
         this.sendTransport.on('connect', ({ dtlsParameters }, callback, _errback) => {
@@ -59,7 +60,9 @@ class MediasoupService {
         });
 
         this.sendTransport.on('produce', ({ kind, rtpParameters }, callback, _errback) => {
+          console.log('Transport produce event:', kind);
           socket.emit('produce', { transportId: this.sendTransport?.id, kind, rtpParameters }, ({ id }: { id: string }) => {
+            console.log('Producer created with id:', id);
             callback({ id });
           });
         });
