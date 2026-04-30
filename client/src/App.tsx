@@ -354,7 +354,15 @@ function App() {
       }
     }
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 2,
+        sampleRate: 48000,
+      }
+    });
     localStreamRef.current = stream;
     const track = stream.getAudioTracks()[0];
     await mediasoupService.produceAudio(track);
@@ -513,7 +521,7 @@ function App() {
                   max="0"
                   value={voiceThreshold}
                   onChange={(e) => {
-                    const val = Math.max(-80, Math.min(-30, Number(e.target.value)));
+                    const val = Number(e.target.value);
                     setVoiceThreshold(val);
                     localStorage.setItem('voiceThreshold', String(val));
                   }}
@@ -553,7 +561,7 @@ function App() {
               <button
                 onClick={() => {
                   const noiseFloor = currentVolume;
-                  const threshold = Math.max(-80, Math.min(-30, noiseFloor + 10));
+                  const threshold = Math.max(-100, Math.min(0, noiseFloor + 10));
                   setVoiceThreshold(threshold);
                   localStorage.setItem('voiceThreshold', String(threshold));
                 }}

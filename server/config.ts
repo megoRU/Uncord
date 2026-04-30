@@ -50,6 +50,13 @@ const config: Config = {
           mimeType: 'audio/opus',
           clockRate: 48000,
           channels: 2,
+          parameters: {
+            'sprop-stereo': 1,
+            'stereo': 1,
+            'useinbandfec': 1,
+            'usedtx': 1,
+            'maxaveragebitrate': 128000,
+          },
         },
       ],
     },
