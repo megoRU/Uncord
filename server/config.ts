@@ -49,13 +49,12 @@ const config: Config = {
           kind: 'audio',
           mimeType: 'audio/opus',
           clockRate: 48000,
-          channels: 2,
+          channels: 1, // Моно для голоса достаточно
           parameters: {
-            'sprop-stereo': 1,
-            'stereo': 1,
             'useinbandfec': 1,
             'usedtx': 1,
-            'maxaveragebitrate': 128000,
+            'maxaveragebitrate': 96000, // 96kbps моно - это очень высокое качество
+            'cbr': 0, // Variable bitrate для эффективности
           },
         },
       ],

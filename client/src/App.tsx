@@ -191,26 +191,25 @@ function App() {
 
     const checkVolume = () => {
       if (analyserRef.current) {
-        // Get Time Domain Data for RMS
-        const timeData = new Uint8Array(analyserRef.current.fftSize);
-        analyserRef.current.getByteTimeDomainData(timeData);
+        // Get Time Domain Data for RMS (using Float32Array for better precision)
+        const timeData = new Float32Array(analyserRef.current.fftSize);
+        analyserRef.current.getFloatTimeDomainData(timeData);
 
         let sumSquares = 0;
         for (let i = 0; i < timeData.length; i++) {
-          const normalized = (timeData[i] - 128) / 128; // Normalize to -1 to 1
-          sumSquares += normalized * normalized;
+          sumSquares += timeData[i] * timeData[i];
         }
         const rms = Math.sqrt(sumSquares / timeData.length);
-        let db = rms > 0 ? 20 * Math.log10(rms) : -100;
+        let db = rms > 0.00001 ? 20 * Math.log10(rms) : -100;
 
-        // Антишум
-        if (db < -80) db = -100;
+        // Антишум (отсекаем совсем тихие звуки)
+        if (db < -85) db = -100;
 
         // Clamp
         db = Math.max(-100, Math.min(0, db));
 
-        // Экспоненциальное сглаживание
-        const alpha = 0.2;
+        // Экспоненциальное сглаживание (0.1 - медленно, 0.3 - быстро)
+        const alpha = 0.15;
         smoothedVolumeRef.current = smoothedVolumeRef.current * (1 - alpha) + db * alpha;
 
         setCurrentVolume(Math.round(smoothedVolumeRef.current));
@@ -359,7 +358,7 @@ function App() {
         echoCancellation: true,
         noiseSuppression: true,
         autoGainControl: true,
-        channelCount: 2,
+        channelCount: 1, // Моно для лучшей работы NS/AEC
         sampleRate: 48000,
       }
     });
@@ -541,7 +540,7 @@ function App() {
                     top: 0,
                     height: '100%',
                     width: `${Math.max(0, currentVolume + 100)}%`,
-                    backgroundColor: currentVolume > voiceThreshold ? '#3ba55d' : '#8e9297',
+                    backgroundColor: isVoiceActive ? '#3ba55d' : '#8e9297',
                     transition: 'width 0.1s ease-out'
                   }} />
                   <div style={{
@@ -556,7 +555,11 @@ function App() {
                 <div style={{ color: '#8e9297', fontSize: '10px', textAlign: 'center', marginTop: '5px' }}>Текущий уровень: {currentVolume}dB</div>
               </div>
             </div>
-            <p style={{ color: '#8e9297', fontSize: '14px', marginTop: '10px' }}>Микрофон будет активироваться только когда уровень звука превышает белый маркер.</p>
+            <p style={{ color: '#8e9297', fontSize: '14px', marginTop: '10px' }}>
+              Микрофон будет активироваться только когда уровень звука превышает белый маркер.
+              <br />
+              <span style={{ fontSize: '12px', fontStyle: 'italic' }}>Совет: Говорите обычным голосом во время калибровки.</span>
+            </p>
             <div style={{ marginTop: '20px' }}>
               <button
                 onClick={() => {
