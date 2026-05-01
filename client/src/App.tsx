@@ -88,49 +88,16 @@ function App() {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const smoothedVolumeRef = useRef<number>(-100);
   const silenceTimeoutRef = useRef<any>(null);
+  const timeDataBufferRef = useRef<Float32Array | null>(null);
+  const voiceThresholdRef = useRef<number>(voiceThreshold);
+  const isMutedRef = useRef<boolean>(isMuted);
+  const isVoiceActiveRef = useRef<boolean>(false);
+  const activeTabRef = useRef<'app' | 'settings'>(activeTab);
 
-  useEffect(() => {
-    const activateThreshold = voiceThreshold + 5;
-    const deactivateThreshold = voiceThreshold - 5;
-
-    // ВКЛЮЧЕНИЕ
-    if (!isVoiceActive && currentVolume > activateThreshold && !isMuted) {
-      setIsVoiceActive(true);
-      mediasoupService.resumeProducer();
-
-      if (silenceTimeoutRef.current) {
-        clearTimeout(silenceTimeoutRef.current);
-        silenceTimeoutRef.current = null;
-      }
-      return;
-    }
-
-    // ВЫКЛЮЧЕНИЕ С ЗАДЕРЖКОЙ (Release)
-    if (isVoiceActive && currentVolume < deactivateThreshold) {
-      if (!silenceTimeoutRef.current) {
-        silenceTimeoutRef.current = setTimeout(() => {
-          setIsVoiceActive(false);
-          mediasoupService.pauseProducer();
-          silenceTimeoutRef.current = null;
-        }, 300); // RELEASE_MS
-      }
-    } else {
-      if (silenceTimeoutRef.current) {
-        clearTimeout(silenceTimeoutRef.current);
-        silenceTimeoutRef.current = null;
-      }
-    }
-
-    // Обработка Mute (если замутились - сразу выключаем голос)
-    if (isMuted && isVoiceActive) {
-      setIsVoiceActive(false);
-      mediasoupService.pauseProducer();
-      if (silenceTimeoutRef.current) {
-        clearTimeout(silenceTimeoutRef.current);
-        silenceTimeoutRef.current = null;
-      }
-    }
-  }, [currentVolume, voiceThreshold, isMuted, isVoiceActive]);
+  // Sync refs with state
+  useEffect(() => { voiceThresholdRef.current = voiceThreshold; }, [voiceThreshold]);
+  useEffect(() => { isMutedRef.current = isMuted; }, [isMuted]);
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
 
   useEffect(() => {
     let pingInterval: any;
@@ -192,7 +159,10 @@ function App() {
     const checkVolume = () => {
       if (analyserRef.current) {
         // Get Time Domain Data for RMS (using Float32Array for better precision)
-        const timeData = new Float32Array(analyserRef.current.fftSize);
+        if (!timeDataBufferRef.current || timeDataBufferRef.current.length !== analyserRef.current.fftSize) {
+          timeDataBufferRef.current = new Float32Array(analyserRef.current.fftSize);
+        }
+        const timeData = timeDataBufferRef.current;
         analyserRef.current.getFloatTimeDomainData(timeData);
 
         let sumSquares = 0;
@@ -204,15 +174,58 @@ function App() {
 
         // Антишум (отсекаем совсем тихие звуки)
         if (db < -85) db = -100;
-
-        // Clamp
         db = Math.max(-100, Math.min(0, db));
 
-        // Экспоненциальное сглаживание (0.1 - медленно, 0.3 - быстро)
-        const alpha = 0.15;
+        // Экспоненциальное сглаживание (разная скорость для атаки и спада)
+        const alpha = db > smoothedVolumeRef.current ? 0.4 : 0.15;
         smoothedVolumeRef.current = smoothedVolumeRef.current * (1 - alpha) + db * alpha;
+        const currentVol = Math.round(smoothedVolumeRef.current);
 
-        setCurrentVolume(Math.round(smoothedVolumeRef.current));
+        // Update state only if settings are open to save performance
+        if (activeTabRef.current === 'settings') {
+          setCurrentVolume(currentVol);
+        }
+
+        // VAD Logic inside loop for maximum responsiveness
+        const threshold = voiceThresholdRef.current;
+        const activateThreshold = threshold; // Use threshold directly for clarity
+        const deactivateThreshold = threshold - 6; // Hysteresis
+        const isMutedNow = isMutedRef.current;
+
+        if (!isVoiceActiveRef.current && currentVol > activateThreshold && !isMutedNow) {
+          // ACTIVATE
+          isVoiceActiveRef.current = true;
+          setIsVoiceActive(true);
+          mediasoupService.resumeProducer();
+          if (silenceTimeoutRef.current) {
+            clearTimeout(silenceTimeoutRef.current);
+            silenceTimeoutRef.current = null;
+          }
+        } else if (isVoiceActiveRef.current && (currentVol < deactivateThreshold || isMutedNow)) {
+          // DEACTIVATE with delay (unless muted)
+          if (isMutedNow) {
+            isVoiceActiveRef.current = false;
+            setIsVoiceActive(false);
+            mediasoupService.pauseProducer();
+            if (silenceTimeoutRef.current) {
+              clearTimeout(silenceTimeoutRef.current);
+              silenceTimeoutRef.current = null;
+            }
+          } else if (!silenceTimeoutRef.current) {
+            silenceTimeoutRef.current = setTimeout(() => {
+              isVoiceActiveRef.current = false;
+              setIsVoiceActive(false);
+              mediasoupService.pauseProducer();
+              silenceTimeoutRef.current = null;
+            }, 500); // Release delay
+          }
+        } else if (isVoiceActiveRef.current && currentVol >= deactivateThreshold && !isMutedNow) {
+          // Keep active, cancel pending silence timeout
+          if (silenceTimeoutRef.current) {
+            clearTimeout(silenceTimeoutRef.current);
+            silenceTimeoutRef.current = null;
+          }
+        }
       }
       requestAnimationFrame(checkVolume);
     };
@@ -329,6 +342,11 @@ function App() {
     setIsMuted(false);
     setIsDeafened(false);
     setIsVoiceActive(false);
+    isVoiceActiveRef.current = false;
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current);
+      silenceTimeoutRef.current = null;
+    }
     setCurrentVolume(-100);
   };
 
@@ -364,7 +382,7 @@ function App() {
     });
     localStreamRef.current = stream;
     const track = stream.getAudioTracks()[0];
-    await mediasoupService.produceAudio(track);
+    await mediasoupService.produceAudio(track, true); // Start paused
 
     // Init VAD
     audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -533,7 +551,7 @@ function App() {
                 </div>
               </div>
               <div style={{ width: '150px' }}>
-                <div style={{ height: '10px', backgroundColor: '#202225', borderRadius: '5px', overflow: 'hidden', position: 'relative' }}>
+                <div style={{ height: '10px', backgroundColor: '#202225', borderRadius: '5px', overflow: 'hidden', position: 'relative', border: '1px solid #4f545c' }}>
                   <div style={{
                     position: 'absolute',
                     left: 0,
@@ -549,11 +567,19 @@ function App() {
                     top: 0,
                     height: '100%',
                     width: '2px',
-                    backgroundColor: 'white'
+                    backgroundColor: 'white',
+                    zIndex: 2,
+                    boxShadow: '0 0 4px rgba(0,0,0,0.5)'
                   }} />
                 </div>
                 <div style={{ color: '#8e9297', fontSize: '10px', textAlign: 'center', marginTop: '5px' }}>Текущий уровень: {currentVolume}dB</div>
               </div>
+            </div>
+            <div style={{ marginTop: '10px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div style={{ width: '12px', height: '12px', borderRadius: '50%', backgroundColor: isVoiceActive ? '#3ba55d' : '#8e9297', boxShadow: isVoiceActive ? '0 0 8px #3ba55d' : 'none', transition: 'all 0.2s' }} />
+              <span style={{ fontSize: '14px', color: isVoiceActive ? '#3ba55d' : '#8e9297', fontWeight: 'bold', transition: 'color 0.2s' }}>
+                {isVoiceActive ? 'ГОЛОС ОБНАРУЖЕН' : 'ТИШИНА'}
+              </span>
             </div>
             <p style={{ color: '#8e9297', fontSize: '14px', marginTop: '10px' }}>
               Микрофон будет активироваться только когда уровень звука превышает белый маркер.
