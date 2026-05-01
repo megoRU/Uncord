@@ -81,54 +81,76 @@ function App() {
   });
   const [currentVolume, setCurrentVolume] = useState<number>(-100);
   const [isVoiceActive, setIsVoiceActive] = useState<boolean>(false);
+  const [isMicTesting, setIsMicTesting] = useState<boolean>(false);
 
   const localStreamRef = useRef<MediaStream | null>(null);
+  const settingsStreamRef = useRef<MediaStream | null>(null);
   const remoteAudiosRef = useRef<{ [peerId: string]: HTMLAudioElement }>({});
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const smoothedVolumeRef = useRef<number>(-100);
   const silenceTimeoutRef = useRef<any>(null);
   const timeDataBufferRef = useRef<Float32Array | null>(null);
+  const micTestGainRef = useRef<GainNode | null>(null);
   const voiceThresholdRef = useRef<number>(voiceThreshold);
   const isMutedRef = useRef<boolean>(isMuted);
   const isVoiceActiveRef = useRef<boolean>(false);
+  const isMicTestingRef = useRef<boolean>(false);
   const activeTabRef = useRef<'app' | 'settings'>(activeTab);
 
   // Sync refs with state
   useEffect(() => { voiceThresholdRef.current = voiceThreshold; }, [voiceThreshold]);
   useEffect(() => { isMutedRef.current = isMuted; }, [isMuted]);
+  useEffect(() => { isMicTestingRef.current = isMicTesting; }, [isMicTesting]);
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+
+  useEffect(() => {
+    if (!isMicTesting && micTestGainRef.current) {
+      micTestGainRef.current.gain.value = 0;
+    }
+  }, [isMicTesting]);
 
   // Settings Mic Test
   useEffect(() => {
-    let settingsStream: MediaStream | null = null;
-
     const startSettingsMic = async () => {
       if (activeTab === 'settings' && !currentRoom) {
         try {
-          settingsStream = await navigator.mediaDevices.getUserMedia({
+          if (settingsStreamRef.current) return;
+
+          const stream = await navigator.mediaDevices.getUserMedia({
             audio: {
-              echoCancellation: true,
+              echoCancellation: false,
               noiseSuppression: true,
-              autoGainControl: true,
+              autoGainControl: false,
               // @ts-ignore
-              googEchoCancellation: true,
+              googEchoCancellation: false,
               // @ts-ignore
               googNoiseSuppression: true,
               // @ts-ignore
-              googAutoGainControl: true,
+              googHighpassFilter: true,
+              // @ts-ignore
+              googAutoGainControl: false,
               channelCount: 1,
               sampleRate: 48000,
             }
           });
+          settingsStreamRef.current = stream;
 
-          audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+          if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+            audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+          }
           await audioContextRef.current.resume();
-          const source = audioContextRef.current.createMediaStreamSource(settingsStream);
+          const source = audioContextRef.current.createMediaStreamSource(stream);
           analyserRef.current = audioContextRef.current.createAnalyser();
           analyserRef.current.fftSize = 512;
           analyserRef.current.smoothingTimeConstant = 0.8;
           source.connect(analyserRef.current);
+
+          // Mic test gain setup
+          micTestGainRef.current = audioContextRef.current.createGain();
+          micTestGainRef.current.gain.value = 0;
+          source.connect(micTestGainRef.current);
+          micTestGainRef.current.connect(audioContextRef.current.destination);
         } catch (err) {
           console.error('Failed to start settings mic:', err);
         }
@@ -137,14 +159,15 @@ function App() {
 
     const stopSettingsMic = () => {
       if (!currentRoom) {
-        if (settingsStream) {
-          settingsStream.getTracks().forEach(t => t.stop());
-          settingsStream = null;
+        if (settingsStreamRef.current) {
+          settingsStreamRef.current.getTracks().forEach(t => t.stop());
+          settingsStreamRef.current = null;
         }
         if (audioContextRef.current && activeTab !== 'settings') {
           audioContextRef.current.close();
           audioContextRef.current = null;
           analyserRef.current = null;
+          micTestGainRef.current = null;
         }
       }
     };
@@ -231,9 +254,8 @@ function App() {
           sumSquares += timeData[i] * timeData[i];
         }
         const rms = Math.sqrt(sumSquares / timeData.length);
-        // Standard formula: 20 * log10(rms)
-        // Reference 1.0 is max digital amplitude. Typical speech RMS is around 0.01 (-40dB) to 0.1 (-20dB).
-        // Let's use a +30dB offset to map -60dB noise to -30dB and -20dB speech to +10dB (clamped to 0).
+        // Map to -100...0 range. Speech RMS 0.01 to 0.1.
+        // +30dB offset maps speech to -20dB to 0dB range.
         let db = rms > 0.000001 ? 20 * Math.log10(rms) + 30 : -100;
 
         // Noise gate
@@ -241,7 +263,7 @@ function App() {
         db = Math.max(-100, Math.min(0, db));
 
         // Экспоненциальное сглаживание (разная скорость для атаки и спада)
-        const alpha = db > smoothedVolumeRef.current ? 0.6 : 0.1;
+        const alpha = db > smoothedVolumeRef.current ? 0.4 : 0.1;
         smoothedVolumeRef.current = smoothedVolumeRef.current * (1 - alpha) + db * alpha;
         const currentVol = Math.round(smoothedVolumeRef.current);
 
@@ -261,6 +283,11 @@ function App() {
           isVoiceActiveRef.current = true;
           setIsVoiceActive(true);
           mediasoupService.resumeProducer();
+
+          if (isMicTestingRef.current && micTestGainRef.current) {
+            micTestGainRef.current.gain.setTargetAtTime(1, audioContextRef.current!.currentTime, 0.01);
+          }
+
           if (silenceTimeoutRef.current) {
             clearTimeout(silenceTimeoutRef.current);
             silenceTimeoutRef.current = null;
@@ -282,9 +309,24 @@ function App() {
                 isVoiceActiveRef.current = false;
                 setIsVoiceActive(false);
                 mediasoupService.pauseProducer();
+                if (micTestGainRef.current) {
+                  micTestGainRef.current.gain.setTargetAtTime(0, audioContextRef.current!.currentTime, 0.01);
+                }
               }
               silenceTimeoutRef.current = null;
             }, 500); // Release delay
+          }
+        } else if (isMutedNow && isVoiceActiveRef.current) {
+          // IMMEDIATE SHUTDOWN IF MUTED
+          isVoiceActiveRef.current = false;
+          setIsVoiceActive(false);
+          mediasoupService.pauseProducer();
+          if (micTestGainRef.current) {
+            micTestGainRef.current.gain.setTargetAtTime(0, audioContextRef.current!.currentTime, 0.01);
+          }
+          if (silenceTimeoutRef.current) {
+            clearTimeout(silenceTimeoutRef.current);
+            silenceTimeoutRef.current = null;
           }
         } else if (isVoiceActiveRef.current && currentVol >= deactivateThreshold && !isMutedNow) {
           // Keep active, cancel pending silence timeout
@@ -440,15 +482,17 @@ function App() {
 
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        echoCancellation: true,
+        echoCancellation: false,
         noiseSuppression: true,
-        autoGainControl: true,
+        autoGainControl: false,
         // @ts-ignore
-        googEchoCancellation: true,
+        googEchoCancellation: false,
         // @ts-ignore
         googNoiseSuppression: true,
         // @ts-ignore
-        googAutoGainControl: true,
+        googHighpassFilter: true,
+        // @ts-ignore
+        googAutoGainControl: false,
         channelCount: 1, // Моно для лучшей работы NS/AEC
         sampleRate: 48000,
       }
@@ -465,6 +509,12 @@ function App() {
     analyserRef.current.fftSize = 512;
     analyserRef.current.smoothingTimeConstant = 0.8;
     source.connect(analyserRef.current);
+
+    // Mic test gain setup (even in room)
+    micTestGainRef.current = audioContextRef.current.createGain();
+    micTestGainRef.current.gain.value = 0;
+    source.connect(micTestGainRef.current);
+    micTestGainRef.current.connect(audioContextRef.current.destination);
 
     setCurrentRoom(room);
   };
@@ -625,8 +675,8 @@ function App() {
                   <span>0dB (Громко)</span>
                 </div>
               </div>
-              <div style={{ width: '150px' }}>
-                <div style={{ height: '10px', backgroundColor: '#202225', borderRadius: '5px', overflow: 'hidden', position: 'relative', border: '1px solid #4f545c' }}>
+              <div style={{ width: '200px' }}>
+                <div style={{ height: '14px', backgroundColor: '#202225', borderRadius: '7px', overflow: 'hidden', position: 'relative', border: '1px solid #4f545c' }}>
                   <div style={{
                     position: 'absolute',
                     left: 0,
@@ -634,7 +684,7 @@ function App() {
                     height: '100%',
                     width: `${Math.max(0, currentVolume + 100)}%`,
                     backgroundColor: isVoiceActive ? '#3ba55d' : '#8e9297',
-                    transition: 'width 0.1s ease-out'
+                    transition: 'width 0.05s linear'
                   }} />
                   <div style={{
                     position: 'absolute',
@@ -661,7 +711,13 @@ function App() {
               <br />
               <span style={{ fontSize: '12px', fontStyle: 'italic' }}>Совет: Говорите обычным голосом во время калибровки.</span>
             </p>
-            <div style={{ marginTop: '20px' }}>
+            <div style={{ marginTop: '20px', display: 'flex', gap: '10px' }}>
+              <button
+                onClick={() => setIsMicTesting(!isMicTesting)}
+                style={{ ...buttonStyle, width: 'auto', fontSize: '14px', padding: '10px 20px', backgroundColor: isMicTesting ? '#ed4245' : '#5865f2' }}
+              >
+                {isMicTesting ? 'Остановить проверку' : 'Проверить микрофон'}
+              </button>
               <button
                 onClick={() => {
                   const noiseFloor = currentVolume;
@@ -669,7 +725,7 @@ function App() {
                   setVoiceThreshold(threshold);
                   localStorage.setItem('voiceThreshold', String(threshold));
                 }}
-                style={{ ...buttonStyle, width: 'auto', fontSize: '14px', padding: '10px 20px' }}
+                style={{ ...buttonStyle, width: 'auto', fontSize: '14px', padding: '10px 20px', backgroundColor: '#4f545c' }}
               >
                 Определить чувствительность
               </button>
