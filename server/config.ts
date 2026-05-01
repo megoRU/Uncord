@@ -49,12 +49,12 @@ const config: Config = {
           kind: 'audio',
           mimeType: 'audio/opus',
           clockRate: 48000,
-          channels: 1, // Моно для голоса достаточно
+          channels: 2, // Mediasoup требует 2 канала для Opus
           parameters: {
             'useinbandfec': 1,
             'usedtx': 1,
-            'maxaveragebitrate': 96000, // 96kbps моно - это очень высокое качество
-            'cbr': 0, // Variable bitrate для эффективности
+            'maxaveragebitrate': 96000,
+            'cbr': 0,
           },
         },
       ],
