@@ -99,6 +99,11 @@ class MediasoupService {
 
   async produceAudio(track: MediaStreamTrack, paused: boolean = false) {
     if (!this.sendTransport) return;
+
+    if (paused) {
+      track.enabled = false;
+    }
+
     const producer = await this.sendTransport.produce({ track, appData: { paused } });
 
     if (paused) {

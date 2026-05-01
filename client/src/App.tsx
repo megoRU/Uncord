@@ -99,6 +99,67 @@ function App() {
   useEffect(() => { isMutedRef.current = isMuted; }, [isMuted]);
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
 
+  // Settings Mic Test
+  useEffect(() => {
+    let settingsStream: MediaStream | null = null;
+
+    const startSettingsMic = async () => {
+      if (activeTab === 'settings' && !currentRoom) {
+        try {
+          settingsStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              // @ts-ignore
+              googEchoCancellation: true,
+              // @ts-ignore
+              googNoiseSuppression: true,
+              // @ts-ignore
+              googAutoGainControl: true,
+              channelCount: 1,
+              sampleRate: 48000,
+            }
+          });
+
+          audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+          await audioContextRef.current.resume();
+          const source = audioContextRef.current.createMediaStreamSource(settingsStream);
+          analyserRef.current = audioContextRef.current.createAnalyser();
+          analyserRef.current.fftSize = 512;
+          analyserRef.current.smoothingTimeConstant = 0.8;
+          source.connect(analyserRef.current);
+        } catch (err) {
+          console.error('Failed to start settings mic:', err);
+        }
+      }
+    };
+
+    const stopSettingsMic = () => {
+      if (!currentRoom) {
+        if (settingsStream) {
+          settingsStream.getTracks().forEach(t => t.stop());
+          settingsStream = null;
+        }
+        if (audioContextRef.current && activeTab !== 'settings') {
+          audioContextRef.current.close();
+          audioContextRef.current = null;
+          analyserRef.current = null;
+        }
+      }
+    };
+
+    if (activeTab === 'settings') {
+      startSettingsMic();
+    } else {
+      stopSettingsMic();
+    }
+
+    return () => {
+      if (!currentRoom) stopSettingsMic();
+    };
+  }, [activeTab, currentRoom]);
+
   useEffect(() => {
     let pingInterval: any;
     if (user) {
@@ -170,14 +231,17 @@ function App() {
           sumSquares += timeData[i] * timeData[i];
         }
         const rms = Math.sqrt(sumSquares / timeData.length);
-        let db = rms > 0.00001 ? 20 * Math.log10(rms) : -100;
+        // Standard formula: 20 * log10(rms)
+        // Reference 1.0 is max digital amplitude. Typical speech RMS is around 0.01 (-40dB) to 0.1 (-20dB).
+        // Let's use a +30dB offset to map -60dB noise to -30dB and -20dB speech to +10dB (clamped to 0).
+        let db = rms > 0.000001 ? 20 * Math.log10(rms) + 30 : -100;
 
-        // Антишум (отсекаем совсем тихие звуки)
-        if (db < -85) db = -100;
+        // Noise gate
+        if (db < -80) db = -100;
         db = Math.max(-100, Math.min(0, db));
 
         // Экспоненциальное сглаживание (разная скорость для атаки и спада)
-        const alpha = db > smoothedVolumeRef.current ? 0.4 : 0.15;
+        const alpha = db > smoothedVolumeRef.current ? 0.6 : 0.1;
         smoothedVolumeRef.current = smoothedVolumeRef.current * (1 - alpha) + db * alpha;
         const currentVol = Math.round(smoothedVolumeRef.current);
 
@@ -213,9 +277,12 @@ function App() {
             }
           } else if (!silenceTimeoutRef.current) {
             silenceTimeoutRef.current = setTimeout(() => {
-              isVoiceActiveRef.current = false;
-              setIsVoiceActive(false);
-              mediasoupService.pauseProducer();
+              // Re-check before actually deactivating
+              if (isVoiceActiveRef.current && (smoothedVolumeRef.current < voiceThresholdRef.current - 6 || isMutedRef.current)) {
+                isVoiceActiveRef.current = false;
+                setIsVoiceActive(false);
+                mediasoupService.pauseProducer();
+              }
               silenceTimeoutRef.current = null;
             }, 500); // Release delay
           }
@@ -376,6 +443,12 @@ function App() {
         echoCancellation: true,
         noiseSuppression: true,
         autoGainControl: true,
+        // @ts-ignore
+        googEchoCancellation: true,
+        // @ts-ignore
+        googNoiseSuppression: true,
+        // @ts-ignore
+        googAutoGainControl: true,
         channelCount: 1, // Моно для лучшей работы NS/AEC
         sampleRate: 48000,
       }
@@ -386,6 +459,7 @@ function App() {
 
     // Init VAD
     audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+    await audioContextRef.current.resume();
     const source = audioContextRef.current.createMediaStreamSource(stream);
     analyserRef.current = audioContextRef.current.createAnalyser();
     analyserRef.current.fftSize = 512;
@@ -456,12 +530,13 @@ function App() {
   };
 
   const toggleMute = () => {
+    const nextMuted = !isMuted;
+    setIsMuted(nextMuted);
+
     if (localStreamRef.current) {
       const track = localStreamRef.current.getAudioTracks()[0];
-      track.enabled = !track.enabled;
-      setIsMuted(!track.enabled);
-    } else {
-      setIsMuted(!isMuted);
+      // Note: We don't touch track.enabled here because VAD logic in checkVolume
+      // handles producer pausing/resuming based on isMutedRef.
     }
   };
 
