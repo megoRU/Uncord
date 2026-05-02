@@ -16,6 +16,7 @@ interface Room {
   id: number;
   name: string;
   guildId: number;
+  participants?: { peerId: string; nickname: string }[];
 }
 
 interface Peer {
@@ -61,7 +62,7 @@ function App() {
   const [modalTitle, setModalTitle] = useState('');
   const [modalValue, setModalValue] = useState('');
   const [modalAction, setModalAction] = useState<((val: string) => void) | null>(null);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<'app' | 'settings'>('app');
   const [isInviteManagerOpen, setIsSettingsInviteManagerOpen] = useState(false);
   const [invites, setInvites] = useState<{ id: number; code: string }[]>([]);
 
@@ -73,8 +74,195 @@ function App() {
   const [ping, setPing] = useState<number | null>(null);
   const [showDebug, setShowDebug] = useState(false);
 
+  // VAD states
+  const [voiceThreshold, setVoiceThreshold] = useState<number>(() => {
+    const saved = localStorage.getItem('voiceThreshold');
+    return saved ? Number(saved) : -50;
+  });
+  const [currentVolume, setCurrentVolume] = useState<number>(-100);
+  const [isVoiceActive, setIsVoiceActive] = useState<boolean>(false);
+  const [isMicTesting, setIsMicTesting] = useState<boolean>(false);
+
   const localStreamRef = useRef<MediaStream | null>(null);
+  const settingsStreamRef = useRef<MediaStream | null>(null);
   const remoteAudiosRef = useRef<{ [peerId: string]: HTMLAudioElement }>({});
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const vadNodeRef = useRef<AudioWorkletNode | null>(null);
+  const smoothedVolumeRef = useRef<number>(-100);
+  const silenceTimeoutRef = useRef<any>(null);
+  const micTestGainRef = useRef<GainNode | null>(null);
+  const voiceThresholdRef = useRef<number>(voiceThreshold);
+  const isMutedRef = useRef<boolean>(isMuted);
+  const isVoiceActiveRef = useRef<boolean>(false);
+  const isMicTestingRef = useRef<boolean>(false);
+  const activeTabRef = useRef<'app' | 'settings'>(activeTab);
+
+  // Sync refs with state
+  useEffect(() => { voiceThresholdRef.current = voiceThreshold; }, [voiceThreshold]);
+  useEffect(() => { isMutedRef.current = isMuted; }, [isMuted]);
+  useEffect(() => { isMicTestingRef.current = isMicTesting; }, [isMicTesting]);
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+
+  useEffect(() => {
+    if (!isMicTesting && micTestGainRef.current) {
+      micTestGainRef.current.gain.value = 0;
+    }
+  }, [isMicTesting]);
+
+  const handleVolumeUpdate = (currentVol: number) => {
+    smoothedVolumeRef.current = currentVol;
+
+    // Update state only if settings are open to save performance
+    if (activeTabRef.current === 'settings') {
+      setCurrentVolume(currentVol);
+    }
+
+    // VAD Logic
+    const threshold = voiceThresholdRef.current;
+    const activateThreshold = threshold;
+    const deactivateThreshold = threshold - 6; // Hysteresis
+    const isMutedNow = isMutedRef.current;
+
+    if (!isVoiceActiveRef.current && currentVol > activateThreshold && !isMutedNow) {
+      // ACTIVATE
+      isVoiceActiveRef.current = true;
+      setIsVoiceActive(true);
+      mediasoupService.resumeProducer();
+
+      if (isMicTestingRef.current && micTestGainRef.current) {
+        micTestGainRef.current.gain.setTargetAtTime(1, audioContextRef.current!.currentTime, 0.01);
+      }
+
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
+    } else if (isVoiceActiveRef.current && (currentVol < deactivateThreshold || isMutedNow)) {
+      // DEACTIVATE with delay (unless muted)
+      if (isMutedNow) {
+        isVoiceActiveRef.current = false;
+        setIsVoiceActive(false);
+        mediasoupService.pauseProducer();
+        if (silenceTimeoutRef.current) {
+          clearTimeout(silenceTimeoutRef.current);
+          silenceTimeoutRef.current = null;
+        }
+      } else if (!silenceTimeoutRef.current) {
+        silenceTimeoutRef.current = setTimeout(() => {
+          // Re-check before actually deactivating
+          if (isVoiceActiveRef.current && (smoothedVolumeRef.current < voiceThresholdRef.current - 6 || isMutedRef.current)) {
+            isVoiceActiveRef.current = false;
+            setIsVoiceActive(false);
+            mediasoupService.pauseProducer();
+            if (micTestGainRef.current && audioContextRef.current) {
+              micTestGainRef.current.gain.setTargetAtTime(0, audioContextRef.current.currentTime, 0.01);
+            }
+          }
+          silenceTimeoutRef.current = null;
+        }, 500); // Release delay
+      }
+    } else if (isMutedNow && isVoiceActiveRef.current) {
+      // IMMEDIATE SHUTDOWN IF MUTED
+      isVoiceActiveRef.current = false;
+      setIsVoiceActive(false);
+      mediasoupService.pauseProducer();
+      if (micTestGainRef.current && audioContextRef.current) {
+        micTestGainRef.current.gain.setTargetAtTime(0, audioContextRef.current.currentTime, 0.01);
+      }
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
+    } else if (isVoiceActiveRef.current && currentVol >= deactivateThreshold && !isMutedNow) {
+      // Keep active, cancel pending silence timeout
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
+    }
+  };
+
+  // Settings Mic Test
+  useEffect(() => {
+    const startSettingsMic = async () => {
+      if (activeTab === 'settings' && !currentRoom) {
+        try {
+          if (settingsStreamRef.current) return;
+
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              // @ts-ignore
+              googEchoCancellation: true,
+              // @ts-ignore
+              googNoiseSuppression: true,
+              // @ts-ignore
+              googHighpassFilter: true,
+              // @ts-ignore
+              googAutoGainControl: true,
+              channelCount: 1,
+              sampleRate: 48000,
+            }
+          });
+          settingsStreamRef.current = stream;
+
+          if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+            audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+          }
+          await audioContextRef.current.resume();
+
+          try {
+            await audioContextRef.current.audioWorklet.addModule('/audio-processor.js');
+          } catch (e) {
+            console.error('Failed to load audio-processor.js', e);
+          }
+
+          const source = audioContextRef.current.createMediaStreamSource(stream);
+          const vadNode = new AudioWorkletNode(audioContextRef.current, 'vad-processor');
+          vadNode.port.onmessage = (event) => {
+            handleVolumeUpdate(event.data.volume);
+          };
+          source.connect(vadNode);
+          vadNodeRef.current = vadNode;
+
+          // Mic test gain setup
+          micTestGainRef.current = audioContextRef.current.createGain();
+          micTestGainRef.current.gain.value = 0;
+          source.connect(micTestGainRef.current);
+          micTestGainRef.current.connect(audioContextRef.current.destination);
+        } catch (err) {
+          console.error('Failed to start settings mic:', err);
+        }
+      }
+    };
+
+    const stopSettingsMic = () => {
+      if (!currentRoom) {
+        if (settingsStreamRef.current) {
+          settingsStreamRef.current.getTracks().forEach(t => t.stop());
+          settingsStreamRef.current = null;
+        }
+        if (audioContextRef.current && activeTab !== 'settings') {
+          audioContextRef.current.close();
+          audioContextRef.current = null;
+          vadNodeRef.current = null;
+          micTestGainRef.current = null;
+        }
+      }
+    };
+
+    if (activeTab === 'settings') {
+      startSettingsMic();
+    } else {
+      stopSettingsMic();
+    }
+
+    return () => {
+      if (!currentRoom) stopSettingsMic();
+    };
+  }, [activeTab, currentRoom]);
 
   useEffect(() => {
     let pingInterval: any;
@@ -133,12 +321,22 @@ function App() {
       setOnlineUsers(users);
     });
 
+    socket.on('roomUsersUpdate', ({ guildId, rooms: updatedRooms }: { guildId: number, rooms: Room[] }) => {
+      setRooms(prevRooms => {
+        if (prevRooms.length > 0 && prevRooms[0].guildId === guildId) {
+          return updatedRooms;
+        }
+        return prevRooms;
+      });
+    });
+
     return () => {
       socket.off('peerJoined');
       socket.off('peerLeft');
       socket.off('newProducer');
       socket.off('activeSpeaker');
       socket.off('onlineUsersUpdate');
+      socket.off('roomUsersUpdate');
     };
   }, []);
 
@@ -216,6 +414,11 @@ function App() {
       localStreamRef.current.getTracks().forEach(t => t.stop());
       localStreamRef.current = null;
     }
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+      analyserRef.current = null;
+    }
     // Clean up remote audios
     Object.values(remoteAudiosRef.current).forEach(a => a.remove());
     remoteAudiosRef.current = {};
@@ -227,11 +430,18 @@ function App() {
     setPeers([]);
     setIsMuted(false);
     setIsDeafened(false);
+    setIsVoiceActive(false);
+    isVoiceActiveRef.current = false;
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current);
+      silenceTimeoutRef.current = null;
+    }
+    setCurrentVolume(-100);
   };
 
   const joinRoom = async (room: Room) => {
     if (currentRoom) {
-      leaveRoom();
+      await leaveRoom();
     }
 
     if (!user) return;
@@ -250,10 +460,50 @@ function App() {
       }
     }
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        // @ts-ignore
+        googEchoCancellation: true,
+        // @ts-ignore
+        googNoiseSuppression: true,
+        // @ts-ignore
+        googHighpassFilter: true,
+        // @ts-ignore
+        googAutoGainControl: true,
+        channelCount: 1, // Моно для лучшей работы NS/AEC
+        sampleRate: 48000,
+      }
+    });
     localStreamRef.current = stream;
     const track = stream.getAudioTracks()[0];
-    await mediasoupService.produceAudio(track);
+    await mediasoupService.produceAudio(track, true); // Start paused
+
+    // Init VAD
+    audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+    await audioContextRef.current.resume();
+
+    try {
+      await audioContextRef.current.audioWorklet.addModule('/audio-processor.js');
+    } catch (e) {
+      console.error('Failed to load audio-processor.js', e);
+    }
+
+    const source = audioContextRef.current.createMediaStreamSource(stream);
+    const vadNode = new AudioWorkletNode(audioContextRef.current, 'vad-processor');
+    vadNode.port.onmessage = (event) => {
+      handleVolumeUpdate(event.data.volume);
+    };
+    source.connect(vadNode);
+    vadNodeRef.current = vadNode;
+
+    // Mic test gain setup (even in room)
+    micTestGainRef.current = audioContextRef.current.createGain();
+    micTestGainRef.current.gain.value = 0;
+    source.connect(micTestGainRef.current);
+    micTestGainRef.current.connect(audioContextRef.current.destination);
 
     setCurrentRoom(room);
   };
@@ -319,12 +569,13 @@ function App() {
   };
 
   const toggleMute = () => {
+    const nextMuted = !isMuted;
+    setIsMuted(nextMuted);
+
     if (localStreamRef.current) {
       const track = localStreamRef.current.getAudioTracks()[0];
-      track.enabled = !track.enabled;
-      setIsMuted(!track.enabled);
-    } else {
-      setIsMuted(!isMuted);
+      // Note: We don't touch track.enabled here because VAD logic in checkVolume
+      // handles producer pausing/resuming based on isMutedRef.
     }
   };
 
@@ -376,6 +627,104 @@ function App() {
     );
   }
 
+  if (activeTab === 'settings') {
+    return (
+      <div style={{ display: 'flex', height: '100vh', fontFamily: 'sans-serif', backgroundColor: '#36393f', color: 'white' }}>
+        <div style={{ width: '240px', backgroundColor: '#2f3136', padding: '40px 10px 10px 20px', display: 'flex', flexDirection: 'column', gap: '5px' }}>
+          <h4 style={{ color: '#8e9297', fontSize: '12px', textTransform: 'uppercase', marginBottom: '10px' }}>Настройки пользователя</h4>
+          <div style={{ padding: '8px', borderRadius: '4px', backgroundColor: '#4f545c', cursor: 'pointer' }}>Голос и видео</div>
+          <div style={{ padding: '8px', borderRadius: '4px', cursor: 'default', color: '#8e9297' }}>Профиль (Скоро)</div>
+          <div style={{ padding: '8px', borderRadius: '4px', cursor: 'default', color: '#8e9297' }}>Внешний вид (Скоро)</div>
+          <div style={{ marginTop: 'auto', borderTop: '1px solid #4f545c', paddingTop: '10px' }}>
+            <div onClick={handleLogout} style={{ padding: '8px', borderRadius: '4px', cursor: 'pointer', color: '#ed4245' }}>Выйти</div>
+          </div>
+        </div>
+        <div style={{ flex: 1, padding: '60px 40px', overflowY: 'auto', position: 'relative' }}>
+          <div onClick={() => setActiveTab('app')} style={{ position: 'absolute', top: '40px', right: '40px', width: '36px', height: '36px', borderRadius: '50%', border: '2px solid #b9bbbe', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#b9bbbe' }} title="ESC">✕</div>
+          <h2 style={{ marginBottom: '20px' }}>Голос и видео</h2>
+          <div style={{ marginBottom: '40px' }}>
+            <h4 style={{ color: '#b9bbbe', textTransform: 'uppercase', fontSize: '12px', marginBottom: '10px' }}>Чувствительность микрофона</h4>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '20px', backgroundColor: '#2f3136', padding: '20px', borderRadius: '8px' }}>
+              <div style={{ flex: 1 }}>
+                <input
+                  type="range"
+                  min="-100"
+                  max="0"
+                  value={voiceThreshold}
+                  onChange={(e) => {
+                    const val = Number(e.target.value);
+                    setVoiceThreshold(val);
+                    localStorage.setItem('voiceThreshold', String(val));
+                  }}
+                  style={{ width: '100%', cursor: 'pointer' }}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#8e9297', fontSize: '12px', marginTop: '5px' }}>
+                  <span>-100dB (Тихо)</span>
+                  <span>{voiceThreshold}dB</span>
+                  <span>0dB (Громко)</span>
+                </div>
+              </div>
+              <div style={{ width: '200px' }}>
+                <div style={{ height: '14px', backgroundColor: '#202225', borderRadius: '7px', overflow: 'hidden', position: 'relative', border: '1px solid #4f545c' }}>
+                  <div style={{
+                    position: 'absolute',
+                    left: 0,
+                    top: 0,
+                    height: '100%',
+                    width: `${Math.max(0, currentVolume + 100)}%`,
+                    backgroundColor: isVoiceActive ? '#3ba55d' : '#8e9297',
+                    transition: 'width 0.05s linear'
+                  }} />
+                  <div style={{
+                    position: 'absolute',
+                    left: `${voiceThreshold + 100}%`,
+                    top: 0,
+                    height: '100%',
+                    width: '2px',
+                    backgroundColor: 'white',
+                    zIndex: 2,
+                    boxShadow: '0 0 4px rgba(0,0,0,0.5)'
+                  }} />
+                </div>
+                <div style={{ color: '#8e9297', fontSize: '10px', textAlign: 'center', marginTop: '5px' }}>Текущий уровень: {currentVolume}dB</div>
+              </div>
+            </div>
+            <div style={{ marginTop: '10px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div style={{ width: '12px', height: '12px', borderRadius: '50%', backgroundColor: isVoiceActive ? '#3ba55d' : '#8e9297', boxShadow: isVoiceActive ? '0 0 8px #3ba55d' : 'none', transition: 'all 0.2s' }} />
+              <span style={{ fontSize: '14px', color: isVoiceActive ? '#3ba55d' : '#8e9297', fontWeight: 'bold', transition: 'color 0.2s' }}>
+                {isVoiceActive ? 'ГОЛОС ОБНАРУЖЕН' : 'ТИШИНА'}
+              </span>
+            </div>
+            <p style={{ color: '#8e9297', fontSize: '14px', marginTop: '10px' }}>
+              Микрофон будет активироваться только когда уровень звука превышает белый маркер.
+              <br />
+              <span style={{ fontSize: '12px', fontStyle: 'italic' }}>Совет: Говорите обычным голосом во время калибровки.</span>
+            </p>
+            <div style={{ marginTop: '20px', display: 'flex', gap: '10px' }}>
+              <button
+                onClick={() => setIsMicTesting(!isMicTesting)}
+                style={{ ...buttonStyle, width: 'auto', fontSize: '14px', padding: '10px 20px', backgroundColor: isMicTesting ? '#ed4245' : '#5865f2' }}
+              >
+                {isMicTesting ? 'Остановить проверку' : 'Проверить микрофон'}
+              </button>
+              <button
+                onClick={() => {
+                  const noiseFloor = currentVolume;
+                  const threshold = Math.max(-100, Math.min(0, noiseFloor + 10));
+                  setVoiceThreshold(threshold);
+                  localStorage.setItem('voiceThreshold', String(threshold));
+                }}
+                style={{ ...buttonStyle, width: 'auto', fontSize: '14px', padding: '10px 20px', backgroundColor: '#4f545c' }}
+              >
+                Определить чувствительность
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: 'flex', height: '100vh', fontFamily: 'sans-serif', backgroundColor: '#2f3136', color: 'white' }}>
       {/* Sidebar: Guilds */}
@@ -389,7 +738,7 @@ function App() {
             </div>
           ))}
         </div>
-        <div onClick={() => setIsSettingsOpen(true)} style={{ ...guildIconStyle, marginTop: 'auto' }} title="Настройки">⚙️</div>
+        <div onClick={() => setActiveTab('settings')} style={{ ...guildIconStyle, marginTop: 'auto' }} title="Настройки">⚙️</div>
       </div>
 
       {/* Sidebar: Rooms */}
@@ -415,14 +764,18 @@ function App() {
               }}>
                 # {r.name}
               </div>
-              {currentRoom?.id === r.id && (
-                <div style={{ paddingLeft: '20px' }}>
-                  <UserAvatar username={user.username} isSpeaking={activeSpeaker === socket.id} isMuted={isMuted} isMe small />
-                  {peers.map(p => (
-                    <UserAvatar key={p.peerId} username={p.nickname} isSpeaking={activeSpeaker === p.peerId} small />
-                  ))}
-                </div>
-              )}
+              <div style={{ paddingLeft: '20px' }}>
+                {r.participants?.map(p => (
+                  <UserAvatar
+                    key={p.peerId}
+                    username={p.nickname}
+                    isSpeaking={p.peerId === socket.id ? isVoiceActive : activeSpeaker === p.peerId}
+                    isMuted={p.peerId === socket.id ? isMuted : false}
+                    isMe={p.peerId === socket.id}
+                    small
+                  />
+                ))}
+              </div>
             </div>
           ))}
         </div>
@@ -493,17 +846,6 @@ function App() {
         </div>
       )}
 
-      {/* Settings Modal */}
-      {isSettingsOpen && (
-        <div style={{ position: 'absolute', top: 0, left: 0, width: '100vw', height: '100vh', backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
-          <div style={{ backgroundColor: '#36393f', padding: '30px', borderRadius: '8px', minWidth: '300px', textAlign: 'center' }}>
-            <h3 style={{ marginTop: 0 }}>Настройки</h3>
-            <p>Аккаунт: <strong>{user.username}</strong></p>
-            <button onClick={() => { handleLogout(); setIsSettingsOpen(false); }} style={{ ...buttonStyle, backgroundColor: '#ed4245' }}>Выйти из аккаунта</button>
-            <button onClick={() => setIsSettingsOpen(false)} style={{ ...buttonStyle, backgroundColor: '#4f545c', marginTop: '10px' }}>Закрыть</button>
-          </div>
-        </div>
-      )}
 
       {/* Modal */}
       {isModalOpen && (
@@ -560,13 +902,13 @@ function UserAvatar({ username, isSpeaking, isMuted, isMe, small }: UserAvatarPr
   const dotSize = small ? '12px' : '20px';
 
   return (
-    <div style={{ display: small ? 'flex' : 'block', alignItems: 'center', textAlign: small ? 'left' : 'center', marginBottom: small ? '5px' : '0' }}>
+    <div style={{ display: small ? 'flex' : 'block', alignItems: 'center', textAlign: 'left', marginBottom: small ? '5px' : '15px' }}>
       <div style={{
         width: size,
         height: size,
         borderRadius: '50%',
         backgroundColor: '#5865f2',
-        margin: '0 auto 10px',
+        margin: small ? '0' : '0 auto 10px',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',

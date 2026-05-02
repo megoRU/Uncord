@@ -49,7 +49,13 @@ const config: Config = {
           kind: 'audio',
           mimeType: 'audio/opus',
           clockRate: 48000,
-          channels: 2,
+          channels: 2, // Mediasoup требует 2 канала для Opus
+          parameters: {
+            'useinbandfec': 1,
+            'usedtx': 1,
+            'maxaveragebitrate': 32000,
+            'cbr': 0,
+          },
         },
       ],
     },

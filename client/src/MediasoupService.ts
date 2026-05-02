@@ -97,11 +97,55 @@ class MediasoupService {
     });
   }
 
-  async produceAudio(track: MediaStreamTrack) {
+  async produceAudio(track: MediaStreamTrack, paused: boolean = false) {
     if (!this.sendTransport) return;
-    const producer = await this.sendTransport.produce({ track });
+
+    if (paused) {
+      track.enabled = false;
+    }
+
+    const producer = await this.sendTransport.produce({ track, appData: { paused } });
+
+    if (paused) {
+      await producer.pause();
+    }
+
     this.producers.set(producer.id, producer);
     return producer;
+  }
+
+  async pauseProducer(producerId?: string) {
+    if (producerId) {
+      const producer = this.producers.get(producerId);
+      if (producer && !producer.paused) {
+        await producer.pause();
+        producer.track!.enabled = false;
+      }
+    } else {
+      for (const producer of this.producers.values()) {
+        if (producer.kind === 'audio' && !producer.paused) {
+          await producer.pause();
+          producer.track!.enabled = false;
+        }
+      }
+    }
+  }
+
+  async resumeProducer(producerId?: string) {
+    if (producerId) {
+      const producer = this.producers.get(producerId);
+      if (producer && producer.paused) {
+        producer.track!.enabled = true;
+        await producer.resume();
+      }
+    } else {
+      for (const producer of this.producers.values()) {
+        if (producer.kind === 'audio' && producer.paused) {
+          producer.track!.enabled = true;
+          await producer.resume();
+        }
+      }
+    }
   }
 
   async consume(producerId: string, _peerId: string): Promise<MediaStreamTrack> {
