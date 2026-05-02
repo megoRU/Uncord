@@ -53,7 +53,7 @@ const config: Config = {
           parameters: {
             'useinbandfec': 1,
             'usedtx': 1,
-            'maxaveragebitrate': 96000,
+            'maxaveragebitrate': 32000,
             'cbr': 0,
           },
         },

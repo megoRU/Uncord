@@ -87,10 +87,9 @@ function App() {
   const settingsStreamRef = useRef<MediaStream | null>(null);
   const remoteAudiosRef = useRef<{ [peerId: string]: HTMLAudioElement }>({});
   const audioContextRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
+  const vadNodeRef = useRef<AudioWorkletNode | null>(null);
   const smoothedVolumeRef = useRef<number>(-100);
   const silenceTimeoutRef = useRef<any>(null);
-  const timeDataBufferRef = useRef<Float32Array | null>(null);
   const micTestGainRef = useRef<GainNode | null>(null);
   const voiceThresholdRef = useRef<number>(voiceThreshold);
   const isMutedRef = useRef<boolean>(isMuted);
@@ -110,6 +109,79 @@ function App() {
     }
   }, [isMicTesting]);
 
+  const handleVolumeUpdate = (currentVol: number) => {
+    smoothedVolumeRef.current = currentVol;
+
+    // Update state only if settings are open to save performance
+    if (activeTabRef.current === 'settings') {
+      setCurrentVolume(currentVol);
+    }
+
+    // VAD Logic
+    const threshold = voiceThresholdRef.current;
+    const activateThreshold = threshold;
+    const deactivateThreshold = threshold - 6; // Hysteresis
+    const isMutedNow = isMutedRef.current;
+
+    if (!isVoiceActiveRef.current && currentVol > activateThreshold && !isMutedNow) {
+      // ACTIVATE
+      isVoiceActiveRef.current = true;
+      setIsVoiceActive(true);
+      mediasoupService.resumeProducer();
+
+      if (isMicTestingRef.current && micTestGainRef.current) {
+        micTestGainRef.current.gain.setTargetAtTime(1, audioContextRef.current!.currentTime, 0.01);
+      }
+
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
+    } else if (isVoiceActiveRef.current && (currentVol < deactivateThreshold || isMutedNow)) {
+      // DEACTIVATE with delay (unless muted)
+      if (isMutedNow) {
+        isVoiceActiveRef.current = false;
+        setIsVoiceActive(false);
+        mediasoupService.pauseProducer();
+        if (silenceTimeoutRef.current) {
+          clearTimeout(silenceTimeoutRef.current);
+          silenceTimeoutRef.current = null;
+        }
+      } else if (!silenceTimeoutRef.current) {
+        silenceTimeoutRef.current = setTimeout(() => {
+          // Re-check before actually deactivating
+          if (isVoiceActiveRef.current && (smoothedVolumeRef.current < voiceThresholdRef.current - 6 || isMutedRef.current)) {
+            isVoiceActiveRef.current = false;
+            setIsVoiceActive(false);
+            mediasoupService.pauseProducer();
+            if (micTestGainRef.current && audioContextRef.current) {
+              micTestGainRef.current.gain.setTargetAtTime(0, audioContextRef.current.currentTime, 0.01);
+            }
+          }
+          silenceTimeoutRef.current = null;
+        }, 500); // Release delay
+      }
+    } else if (isMutedNow && isVoiceActiveRef.current) {
+      // IMMEDIATE SHUTDOWN IF MUTED
+      isVoiceActiveRef.current = false;
+      setIsVoiceActive(false);
+      mediasoupService.pauseProducer();
+      if (micTestGainRef.current && audioContextRef.current) {
+        micTestGainRef.current.gain.setTargetAtTime(0, audioContextRef.current.currentTime, 0.01);
+      }
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
+    } else if (isVoiceActiveRef.current && currentVol >= deactivateThreshold && !isMutedNow) {
+      // Keep active, cancel pending silence timeout
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
+    }
+  };
+
   // Settings Mic Test
   useEffect(() => {
     const startSettingsMic = async () => {
@@ -119,17 +191,17 @@ function App() {
 
           const stream = await navigator.mediaDevices.getUserMedia({
             audio: {
-              echoCancellation: false,
+              echoCancellation: true,
               noiseSuppression: true,
-              autoGainControl: false,
+              autoGainControl: true,
               // @ts-ignore
-              googEchoCancellation: false,
+              googEchoCancellation: true,
               // @ts-ignore
               googNoiseSuppression: true,
               // @ts-ignore
               googHighpassFilter: true,
               // @ts-ignore
-              googAutoGainControl: false,
+              googAutoGainControl: true,
               channelCount: 1,
               sampleRate: 48000,
             }
@@ -140,11 +212,20 @@ function App() {
             audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
           }
           await audioContextRef.current.resume();
+
+          try {
+            await audioContextRef.current.audioWorklet.addModule('/audio-processor.js');
+          } catch (e) {
+            console.error('Failed to load audio-processor.js', e);
+          }
+
           const source = audioContextRef.current.createMediaStreamSource(stream);
-          analyserRef.current = audioContextRef.current.createAnalyser();
-          analyserRef.current.fftSize = 512;
-          analyserRef.current.smoothingTimeConstant = 0.8;
-          source.connect(analyserRef.current);
+          const vadNode = new AudioWorkletNode(audioContextRef.current, 'vad-processor');
+          vadNode.port.onmessage = (event) => {
+            handleVolumeUpdate(event.data.volume);
+          };
+          source.connect(vadNode);
+          vadNodeRef.current = vadNode;
 
           // Mic test gain setup
           micTestGainRef.current = audioContextRef.current.createGain();
@@ -166,7 +247,7 @@ function App() {
         if (audioContextRef.current && activeTab !== 'settings') {
           audioContextRef.current.close();
           audioContextRef.current = null;
-          analyserRef.current = null;
+          vadNodeRef.current = null;
           micTestGainRef.current = null;
         }
       }
@@ -240,106 +321,6 @@ function App() {
       setOnlineUsers(users);
     });
 
-    const checkVolume = () => {
-      if (analyserRef.current) {
-        // Get Time Domain Data for RMS (using Float32Array for better precision)
-        if (!timeDataBufferRef.current || timeDataBufferRef.current.length !== analyserRef.current.fftSize) {
-          timeDataBufferRef.current = new Float32Array(analyserRef.current.fftSize);
-        }
-        const timeData = timeDataBufferRef.current;
-        analyserRef.current.getFloatTimeDomainData(timeData);
-
-        let sumSquares = 0;
-        for (let i = 0; i < timeData.length; i++) {
-          sumSquares += timeData[i] * timeData[i];
-        }
-        const rms = Math.sqrt(sumSquares / timeData.length);
-        // Map to -100...0 range. Speech RMS 0.01 to 0.1.
-        // +30dB offset maps speech to -20dB to 0dB range.
-        let db = rms > 0.000001 ? 20 * Math.log10(rms) + 30 : -100;
-
-        // Noise gate
-        if (db < -80) db = -100;
-        db = Math.max(-100, Math.min(0, db));
-
-        // Экспоненциальное сглаживание (разная скорость для атаки и спада)
-        const alpha = db > smoothedVolumeRef.current ? 0.4 : 0.1;
-        smoothedVolumeRef.current = smoothedVolumeRef.current * (1 - alpha) + db * alpha;
-        const currentVol = Math.round(smoothedVolumeRef.current);
-
-        // Update state only if settings are open to save performance
-        if (activeTabRef.current === 'settings') {
-          setCurrentVolume(currentVol);
-        }
-
-        // VAD Logic inside loop for maximum responsiveness
-        const threshold = voiceThresholdRef.current;
-        const activateThreshold = threshold; // Use threshold directly for clarity
-        const deactivateThreshold = threshold - 6; // Hysteresis
-        const isMutedNow = isMutedRef.current;
-
-        if (!isVoiceActiveRef.current && currentVol > activateThreshold && !isMutedNow) {
-          // ACTIVATE
-          isVoiceActiveRef.current = true;
-          setIsVoiceActive(true);
-          mediasoupService.resumeProducer();
-
-          if (isMicTestingRef.current && micTestGainRef.current) {
-            micTestGainRef.current.gain.setTargetAtTime(1, audioContextRef.current!.currentTime, 0.01);
-          }
-
-          if (silenceTimeoutRef.current) {
-            clearTimeout(silenceTimeoutRef.current);
-            silenceTimeoutRef.current = null;
-          }
-        } else if (isVoiceActiveRef.current && (currentVol < deactivateThreshold || isMutedNow)) {
-          // DEACTIVATE with delay (unless muted)
-          if (isMutedNow) {
-            isVoiceActiveRef.current = false;
-            setIsVoiceActive(false);
-            mediasoupService.pauseProducer();
-            if (silenceTimeoutRef.current) {
-              clearTimeout(silenceTimeoutRef.current);
-              silenceTimeoutRef.current = null;
-            }
-          } else if (!silenceTimeoutRef.current) {
-            silenceTimeoutRef.current = setTimeout(() => {
-              // Re-check before actually deactivating
-              if (isVoiceActiveRef.current && (smoothedVolumeRef.current < voiceThresholdRef.current - 6 || isMutedRef.current)) {
-                isVoiceActiveRef.current = false;
-                setIsVoiceActive(false);
-                mediasoupService.pauseProducer();
-                if (micTestGainRef.current) {
-                  micTestGainRef.current.gain.setTargetAtTime(0, audioContextRef.current!.currentTime, 0.01);
-                }
-              }
-              silenceTimeoutRef.current = null;
-            }, 500); // Release delay
-          }
-        } else if (isMutedNow && isVoiceActiveRef.current) {
-          // IMMEDIATE SHUTDOWN IF MUTED
-          isVoiceActiveRef.current = false;
-          setIsVoiceActive(false);
-          mediasoupService.pauseProducer();
-          if (micTestGainRef.current) {
-            micTestGainRef.current.gain.setTargetAtTime(0, audioContextRef.current!.currentTime, 0.01);
-          }
-          if (silenceTimeoutRef.current) {
-            clearTimeout(silenceTimeoutRef.current);
-            silenceTimeoutRef.current = null;
-          }
-        } else if (isVoiceActiveRef.current && currentVol >= deactivateThreshold && !isMutedNow) {
-          // Keep active, cancel pending silence timeout
-          if (silenceTimeoutRef.current) {
-            clearTimeout(silenceTimeoutRef.current);
-            silenceTimeoutRef.current = null;
-          }
-        }
-      }
-      requestAnimationFrame(checkVolume);
-    };
-    const animId = requestAnimationFrame(checkVolume);
-
     socket.on('roomUsersUpdate', ({ guildId, rooms: updatedRooms }: { guildId: number, rooms: Room[] }) => {
       setRooms(prevRooms => {
         if (prevRooms.length > 0 && prevRooms[0].guildId === guildId) {
@@ -356,7 +337,6 @@ function App() {
       socket.off('activeSpeaker');
       socket.off('onlineUsersUpdate');
       socket.off('roomUsersUpdate');
-      cancelAnimationFrame(animId);
     };
   }, []);
 
@@ -482,17 +462,17 @@ function App() {
 
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        echoCancellation: false,
+        echoCancellation: true,
         noiseSuppression: true,
-        autoGainControl: false,
+        autoGainControl: true,
         // @ts-ignore
-        googEchoCancellation: false,
+        googEchoCancellation: true,
         // @ts-ignore
         googNoiseSuppression: true,
         // @ts-ignore
         googHighpassFilter: true,
         // @ts-ignore
-        googAutoGainControl: false,
+        googAutoGainControl: true,
         channelCount: 1, // Моно для лучшей работы NS/AEC
         sampleRate: 48000,
       }
@@ -504,11 +484,20 @@ function App() {
     // Init VAD
     audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
     await audioContextRef.current.resume();
+
+    try {
+      await audioContextRef.current.audioWorklet.addModule('/audio-processor.js');
+    } catch (e) {
+      console.error('Failed to load audio-processor.js', e);
+    }
+
     const source = audioContextRef.current.createMediaStreamSource(stream);
-    analyserRef.current = audioContextRef.current.createAnalyser();
-    analyserRef.current.fftSize = 512;
-    analyserRef.current.smoothingTimeConstant = 0.8;
-    source.connect(analyserRef.current);
+    const vadNode = new AudioWorkletNode(audioContextRef.current, 'vad-processor');
+    vadNode.port.onmessage = (event) => {
+      handleVolumeUpdate(event.data.volume);
+    };
+    source.connect(vadNode);
+    vadNodeRef.current = vadNode;
 
     // Mic test gain setup (even in room)
     micTestGainRef.current = audioContextRef.current.createGain();
